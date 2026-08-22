@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "download_policy": "explicit-model-manager-only",
+  "runtime_downloads_allowed": false,
+  "models": [
+    {
+      "id": "asr-faster-whisper-small",
+      "stage": "asr",
+      "backend": "faster-whisper",
+      "repository": "Systran/faster-whisper-small",
+      "revision": "536b0662742c02347bc0e980a01041f333bce120",
+      "path": "asr/faster-whisper-small",
+      "tree_sha256": "101416fafddb7e7d39f44ef221e4ad313836b7a1d740fe2509a9d9ab0042959f",
+      "sha256": "101416fafddb7e7d39f44ef221e4ad313836b7a1d740fe2509a9d9ab0042959f",
+      "files": [
+        {"path": "config.json", "size": 2370, "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"},
+        {"path": "model.bin", "size": 483546902, "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"},
+        {"path": "tokenizer.json", "size": 2203239, "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"},
+        {"path": "vocabulary.txt", "size": 459861, "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"}
+      ],
+      "license": "MIT",
+      "languages": ["multilingual"],
+      "compute_type": "float16",
+      "minimum_vram_mib": 2048,
+      "installed": false
+    },
+    {
+      "id": "asr-faster-whisper-large-v3-turbo",
+      "stage": "asr",
+      "backend": "faster-whisper",
+      "repository": "dropbox-dash/faster-whisper-large-v3-turbo",
+      "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+      "path": "asr/faster-whisper-large-v3-turbo",
+      "tree_sha256": "be36aea51ef822e221e44f708874ee6951df19b82d669577c167104632a499ab",
+      "sha256": "be36aea51ef822e221e44f708874ee6951df19b82d669577c167104632a499ab",
+      "files": [
+        {"path": "config.json", "size": 2263, "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"},
+        {"path": "model.bin", "size": 1617884929, "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"},
+        {"path": "preprocessor_config.json", "size": 340, "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"},
+        {"path": "tokenizer.json", "size": 2710337, "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"},
+        {"path": "vocabulary.json", "size": 1068114, "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"}
+      ],
+      "license": "MIT",
+      "languages": ["multilingual"],
+      "compute_type": "float16",
+      "minimum_vram_mib": 6144,
+      "installed": false
+    },
+    {
+      "id": "asr-faster-whisper-large-v3",
+      "stage": "asr",
+      "backend": "faster-whisper",
+      "repository": "Systran/faster-whisper-large-v3",
+      "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "path": "asr/faster-whisper-large-v3",
+      "tree_sha256": "f7aae5248606925aecbc60bb504bf275475e631893cf156ffb8acd1dcf478736",
+      "sha256": "f7aae5248606925aecbc60bb504bf275475e631893cf156ffb8acd1dcf478736",
+      "files": [
+        {"path": "config.json", "size": 2394, "sha256": "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9"},
+        {"path": "model.bin", "size": 3087284237, "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"},
+        {"path": "preprocessor_config.json", "size": 340, "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"},
+        {"path": "tokenizer.json", "size": 2480617, "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"},
+        {"path": "vocabulary.json", "size": 1068114, "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"}
+      ],
+      "license": "MIT",
+      "languages": ["multilingual"],
+      "compute_type": "float16",
+      "minimum_vram_mib": 10240,
+      "installed": false
+    },
+    {
+      "id": "mt-gemma4-e2b-q4",
+      "stage": "mt",
+      "backend": "llama-cpp-server",
+      "repository": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+      "revision": "675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+      "path": "mt/gemma4-e2b-q4",
+      "tree_sha256": "fc8aa4b40a3aa26ea031cf5a553ed993cbef952afeefad7f935ddd2aa69bc182",
+      "sha256": "fc8aa4b40a3aa26ea031cf5a553ed993cbef952afeefad7f935ddd2aa69bc182",
+      "files": [
+        {
+          "path": "gemma-4-E2B_q4_0-it.gguf",
+          "size": 3349516256,
+          "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634"
+        }
+      ],
+      "model_file": "gemma-4-E2B_q4_0-it.gguf",
+      "prompt_template_id": "gemma4-translation-v1",
+      "license": "Apache-2.0",
+      "languages": ["multilingual"],
+      "compute_type": "Q4_0",
+      "minimum_vram_mib": 6144,
+      "quality_tier": "fast",
+      "selectable": true,
+      "installed": false
+    },
+    {
+      "id": "mt-gemma4-31b-q4",
+      "stage": "mt",
+      "backend": "llama-cpp-server",
+      "repository": "google/gemma-4-31B-it-qat-q4_0-gguf",
+      "revision": "59dde24573e7e61570dba08b18a2e1fe246955ed",
+      "path": "mt/gemma4-31b-q4",
+      "tree_sha256": "3c225a6602607e730121efba31931812a58ca3fad4787229e73e93f8041ce610",
+      "sha256": "3c225a6602607e730121efba31931812a58ca3fad4787229e73e93f8041ce610",
+      "files": [
+        {
+          "path": "gemma-4-31B_q4_0-it.gguf",
+          "size": 17651001568,
+          "sha256": "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b"
+        }
+      ],
+      "model_file": "gemma-4-31B_q4_0-it.gguf",
+      "prompt_template_id": "gemma4-translation-v1",
+      "license": "Apache-2.0",
+      "languages": ["multilingual"],
+      "compute_type": "Q4_0",
+      "minimum_vram_mib": 20480,
+      "quality_tier": "maximum",
+      "selectable": true,
+      "installed": false
+    },
+    {
+      "id": "separation-tiger-dnr",
+      "stage": "separation",
+      "backend": "tiger-dnr",
+      "repository": "JusperLee/TIGER-DnR",
+      "revision": "b7a59560bbca10febbcd46fb01600f868e587f57",
+      "path": "separation/tiger-dnr",
+      "tree_sha256": "c6995ec4b397c21d149c55cd8cd4e5fc0d567e5846d2309a5b78a6fa48d54333",
+      "sha256": "c6995ec4b397c21d149c55cd8cd4e5fc0d567e5846d2309a5b78a6fa48d54333",
+      "files": [
+        {"path": "config.json", "size": 250, "sha256": "ba9d2f833bf2f3a5855a35d0ccd11c786f6b92f1a482d84404bc4673edb29b54"},
+        {"path": "model.safetensors", "size": 17130568, "sha256": "dd1c696e72f6adea0085ef1af640882a8260519ad666422835e387a5b4abdd2a"}
+      ],
+      "model_file": "model.safetensors",
+      "config_file": "config.json",
+      "license": "Apache-2.0",
+      "languages": ["cinematic-multilingual"],
+      "compute_type": "float32",
+      "minimum_vram_mib": 6144,
+      "quality_tier": "cinematic-dialogue-music-effects",
+      "selectable": true,
+      "installed": false
+    },
+    {
+      "id": "tts-vieneu-v2",
+      "stage": "tts",
+      "backend": "vieneu",
+      "repository": "pnnbao-ump/VieNeu-TTS-v2",
+      "revision": "b62b1cbddec67cb1d26ac602965d39f0a7faddf2",
+      "path": "tts/vieneu-v2",
+      "tree_sha256": "fa8be1d47bc19d06231736ad673dddb38e04855f7c7160e71f74cc5064b9eb9c",
+      "sha256": "fa8be1d47bc19d06231736ad673dddb38e04855f7c7160e71f74cc5064b9eb9c",
+      "files": [
+        {"path": "added_tokens.json", "size": 1907837, "sha256": "0a3a1b39788775a199b4be9785b016fc52f9ec8169581561da77fa9f90af4803"},
+        {"path": "config.json", "size": 1218, "sha256": "386a7a3480543ed29f4c68906d3a6264d25f5e7df6c9188955b981ebe2dc87a4"},
+        {"path": "generation_config.json", "size": 169, "sha256": "c9545acfc59ec30eeaa0fd80e92f7fee822b0acbaff5076863a1542313f507fe"},
+        {"path": "merges.txt", "size": 758, "sha256": "c795c8cf497405235c3c03f1887024a933cd0bc0461a8731870bedbf6d84635d"},
+        {"path": "model.safetensors", "size": 587360920, "sha256": "f022873124b15030e8216f2da49396bd71e43a69015980b3c0c60e661f77d9b6"},
+        {"path": "special_tokens_map.json", "size": 441, "sha256": "dfbec48c0c6175cddb4e6a2d937c64bcbba3c82cedaddb51cd151124625c37ba"},
+        {"path": "tokenizer.json", "size": 12770462, "sha256": "3cab2ec31f384590a1815359c8d0c2eeaae415fe5574a5fec9132e24619122ab"},
+        {"path": "tokenizer_config.json", "size": 12092263, "sha256": "24a73046d7c68d40aca0f49f23710d45e476de736ff75ff73df4e5fd9ff02510"},
+        {"path": "vocab.json", "size": 3442, "sha256": "1889eb451c473b0c856ff1c546c7b5b97a54163693fb28d14493b485352a9467"},
+        {"path": "voices.json", "size": 21423, "sha256": "621ce89a75bebb890f8a7eee7a9ff1c4cf09325bb1f36b769d071d6f3d8a192c"}
+      ],
+      "model_file": "model.safetensors",
+      "config_file": "config.json",
+      "support_model_id": "tts-neucodec-onnx-int8",
+      "runtime_entrypoint": "/opt/vieneu/vieneu-offline.py",
+      "license": "Apache-2.0",
+      "languages": ["vi"],
+      "compute_type": "float16",
+      "minimum_vram_mib": 4096,
+      "quality_tier": "high",
+      "voice_reference": "bundled-presets-or-user-supplied-authorized",
+      "selectable": true,
+      "installed": false
+    },
+    {
+      "id": "tts-neucodec-onnx-int8",
+      "stage": "tts-support",
+      "backend": "onnxruntime",
+      "repository": "neuphonic/neucodec-onnx-decoder-int8",
+      "revision": "706f4bd5fcc39b039c333d5407f58b0075dcee07",
+      "path": "tts/support/neucodec-onnx-int8",
+      "tree_sha256": "be786eaca4e9d070d99e845f6b62fdec7ab91c1531225659a72a2764ae9e6911",
+      "sha256": "be786eaca4e9d070d99e845f6b62fdec7ab91c1531225659a72a2764ae9e6911",
+      "files": [
+        {"path": "meta.yaml", "size": 37, "sha256": "232631816b83ee6c8929b7f0b960aedb7b215caa73dd96f7a0e60946b2a1319b"},
+        {"path": "model.onnx", "size": 312292102, "sha256": "3ddd9e56396e6029e0e948ac0255c89c803f981f23dcf4c154f50820bd74a6b3"}
+      ],
+      "model_file": "model.onnx",
+      "license": "Apache-2.0",
+      "languages": ["audio-codec"],
+      "compute_type": "int8-cpu",
+      "minimum_vram_mib": 0,
+      "selectable": false,
+      "installed": false
+    },
+    {
+      "id": "tts-piper-vi-vais1000-medium",
+      "stage": "tts",
+      "backend": "piper",
+      "repository": "rhasspy/piper-voices",
+      "revision": "320d5f7f7751a17ef6512d5c23863056c6a11c0f",
+      "path": "tts/piper-vi-vais1000-medium",
+      "tree_sha256": "a4ea48bcaf4c9ff6da8abdeee79da812be9a785ef6c9210ec9bcda51f4855333",
+      "sha256": "a4ea48bcaf4c9ff6da8abdeee79da812be9a785ef6c9210ec9bcda51f4855333",
+      "files": [
+        {"path": "vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx", "size": 63201294, "sha256": "ec7c89e2c85f4d1edc24b6120c18aaf1bda614f06b511567eb9c7c0de15e2dab"},
+        {"path": "vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx.json", "size": 4860, "sha256": "fafb9da1354ed4b77c31af228ed41fb41cd825c14cffa105454b25e6ae751ee0"}
+      ],
+      "model_file": "vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx",
+      "config_file": "vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx.json",
+      "license": "CC-BY-4.0",
+      "runtime_license": "GPL-3.0-or-later",
+      "languages": ["vi"],
+      "compute_type": "float32-cpu",
+      "minimum_vram_mib": 0,
+      "quality_tier": "fallback",
+      "attribution": "Vais1000 Vietnamese speech corpus",
+      "selectable": true,
+      "installed": false
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "components": {
+    "prowlarr": {
+      "version": "2.5.2.5491",
+      "url": "https://github.com/Prowlarr/Prowlarr/releases/download/v2.5.2.5491/Prowlarr.master.2.5.2.5491.linux-core-x64.tar.gz",
+      "sha256": "22fe95742869d7af5e16d420c7889185579152ea8324be6c6e4e3cd011f4c37b",
+      "license": "GPL-3.0-only"
+    },
+    "qbittorrent_nox": {
+      "package": "qbittorrent-nox",
+      "version": "4.4.1-2",
+      "source": "Ubuntu 22.04 jammy"
+    },
+    "ffmpeg": {
+      "package": "ffmpeg",
+      "source": "Ubuntu 22.04 jammy"
+    },
+    "llama_cpp": {
+      "release": "b10208",
+      "commit": "9d9a6d29f6b981cc7f41983d26e56485c6af1811",
+      "repository": "https://github.com/ggml-org/llama.cpp.git",
+      "license": "MIT",
+      "cuda_version": "12.8",
+      "cuda_supported_versions": [
+        "12.6",
+        "12.8"
+      ],
+      "cuda_supported_architectures": [
+        70,
+        75,
+        80,
+        86,
+        89,
+        90,
+        120
+      ],
+      "cuda_default_build_architecture": 86,
+      "cmake_flags": [
+        "GGML_CUDA=ON",
+        "LLAMA_CURL=OFF",
+        "LLAMA_BUILD_UI=OFF",
+        "LLAMA_USE_PREBUILT_UI=OFF",
+        "LLAMA_BUILD_TESTS=OFF",
+        "LLAMA_BUILD_EXAMPLES=ON",
+        "CMAKE_BUILD_RPATH_USE_ORIGIN=ON"
+      ]
+    },
+    "tiger": {
+      "repository": "https://github.com/JusperLee/TIGER.git",
+      "commit": "9f18d4a10a7137e1ce8052cfb62215179f1287b6",
+      "license": "MIT",
+      "runtime_path": "/opt/tiger",
+      "compatibility_overlay": "native/tiger-layers-init.py",
+      "compatibility_overlay_sha256": "6590262bf7be546bf6682a80c4ac6a59223ce4a2e18bb4366b7e12d3c3bb368d",
+      "notes": "Overlay removes eager imports of unused legacy training-only layers; TIGER-DnR model code is unchanged."
+    },
+    "vieneu": {
+      "repository": "https://github.com/pnnbao97/VieNeu-TTS.git",
+      "commit": "4002d8d6749d516b446c012f5e6729b7661529d2",
+      "version": "3.2.3",
+      "license": "Apache-2.0",
+      "source_path": "/opt/vieneu/source",
+      "entrypoint": "/opt/vieneu/vieneu-offline.py",
+      "entrypoint_source": "scripts/vieneu-offline.py",
+      "entrypoint_sha256": "7b9b2a8053efff5f27228a49b82a643716c2115a363d1731fb15bfd814b0da26"
+    },
+    "piper_tts": {
+      "package": "piper-tts",
+      "version": "1.5.0",
+      "repository": "https://github.com/OHF-Voice/piper1-gpl.git",
+      "license": "GPL-3.0-or-later"
+    }
+  }
+}

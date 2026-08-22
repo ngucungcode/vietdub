@@ -1,0 +1,240 @@
+name: thuyet-minh-offline-gpu
+
+x-app-service: &app-service
+  image: thuyet-minh-offline-gpu:phase1
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      APP_UID: ${PUID:-10001}
+      APP_GID: ${PGID:-10001}
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=2g,uid=${PUID:-10001},gid=${PGID:-10001}
+
+services:
+  volume-init:
+    <<: *app-service
+    user: "0:0"
+    restart: "no"
+    command: ["python3.12", "-m", "dub_server.volume_init"]
+    environment:
+      DUB_APP_UID: ${PUID:-10001}
+      DUB_APP_GID: ${PGID:-10001}
+    network_mode: none
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    volumes:
+      - app_config:/config
+      - models:/models
+      - incoming_data:/data/incoming
+      - jobs_data:/data/jobs
+      - output_data:/data/output
+      - job_state:/state
+
+  api:
+    <<: *app-service
+    command: ["uvicorn", "dub_server.api:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      # Container listens on all interfaces, but host publishing stays loopback-only.
+      # Explicit local policy preserves zero-token access through that host socket.
+      DUB_API_HOST: 127.0.0.1
+      DUB_API_ACCESS_POLICY: local
+      DUB_DATABASE_PATH: /state/jobs.sqlite3
+      DUB_MODELS_LOCK_PATH: /app/config/models.lock.json
+      DUB_MODELS_DIR: /models
+      DUB_INCOMING_DIR: /data/incoming
+      DUB_JOBS_DIR: /data/jobs
+      DUB_OUTPUT_DIR: /data/output
+      DUB_UPLOAD_MEDIA_MAX_BYTES: ${DUB_UPLOAD_MEDIA_MAX_BYTES:-17179869184}
+      DUB_UPLOAD_SUBTITLE_MAX_BYTES: ${DUB_UPLOAD_SUBTITLE_MAX_BYTES:-16777216}
+      DUB_UPLOAD_SESSION_TTL_SECONDS: ${DUB_UPLOAD_SESSION_TTL_SECONDS:-604800}
+      DUB_GPU_REPORT_PATH: /state/gpu-health.json
+      DUB_DEFAULT_ASR_MODEL_ID: ${DUB_DEFAULT_ASR_MODEL_ID:-asr-faster-whisper-small}
+      DUB_DEFAULT_TRANSLATION_MODEL_ID: ${DUB_DEFAULT_TRANSLATION_MODEL_ID:-mt-gemma4-e2b-q4}
+      DUB_DEFAULT_SEPARATION_MODEL_ID: ${DUB_DEFAULT_SEPARATION_MODEL_ID:-separation-tiger-dnr}
+      DUB_DEFAULT_TTS_MODEL_ID: ${DUB_DEFAULT_TTS_MODEL_ID:-tts-piper-vi-vais1000-medium}
+      DUB_TTS_SUPPORT_MODEL_ID: ${DUB_TTS_SUPPORT_MODEL_ID:-tts-neucodec-onnx-int8}
+      DUB_PROWLARR_URL: http://prowlarr:9696
+      DUB_PROWLARR_API_KEY_FILE: /run/secrets/prowlarr_api_key
+      DUB_QBITTORRENT_URL: http://qbittorrent:8080
+      DUB_QBITTORRENT_USERNAME: ${DUB_QBITTORRENT_USERNAME:-admin}
+      DUB_QBITTORRENT_PASSWORD_FILE: /run/secrets/qbittorrent_password
+      DUB_OPENSUBTITLES_API_KEY_FILE: /run/secrets/opensubtitles_api_key
+      DUB_OPENSUBTITLES_TOKEN_FILE: /run/secrets/opensubtitles_token
+      DUB_OPENSUBTITLES_URL: ${DUB_OPENSUBTITLES_URL:-https://api.opensubtitles.com/api/v1}
+      DUB_OPENSUBTITLES_USER_AGENT: ${DUB_OPENSUBTITLES_USER_AGENT:-ThuyetMinhOfflineGPU v0.3.8}
+    ports:
+      - "127.0.0.1:${DUB_API_PORT:-8080}:8080"
+    volumes:
+      - app_config:/config:ro
+      - models:/models:ro
+      - incoming_data:/data/incoming
+      - jobs_data:/data/jobs
+      - output_data:/data/output
+      - job_state:/state
+      - ./config/models.lock.json:/app/config/models.lock.json:ro
+    secrets:
+      - prowlarr_api_key
+      - qbittorrent_password
+      - opensubtitles_api_key
+      - opensubtitles_token
+    networks:
+      - control
+      - api_egress
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python3.12", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *app-service
+    command: ["python3.12", "-m", "dub_server.worker"]
+    network_mode: none
+    environment:
+      DUB_DATABASE_PATH: /state/jobs.sqlite3
+      DUB_MODELS_LOCK_PATH: /app/config/models.lock.json
+      DUB_MODELS_DIR: /models
+      DUB_INCOMING_DIR: /data/incoming
+      DUB_JOBS_DIR: /data/jobs
+      DUB_OUTPUT_DIR: /data/output
+      DUB_GPU_REPORT_PATH: /state/gpu-health.json
+      DUB_DEFAULT_ASR_MODEL_ID: ${DUB_DEFAULT_ASR_MODEL_ID:-asr-faster-whisper-small}
+      DUB_DEFAULT_TRANSLATION_MODEL_ID: ${DUB_DEFAULT_TRANSLATION_MODEL_ID:-mt-gemma4-e2b-q4}
+      DUB_DEFAULT_SEPARATION_MODEL_ID: ${DUB_DEFAULT_SEPARATION_MODEL_ID:-separation-tiger-dnr}
+      DUB_DEFAULT_TTS_MODEL_ID: ${DUB_DEFAULT_TTS_MODEL_ID:-tts-piper-vi-vais1000-medium}
+      DUB_TTS_SUPPORT_MODEL_ID: ${DUB_TTS_SUPPORT_MODEL_ID:-tts-neucodec-onnx-int8}
+      DUB_TIGER_SOURCE_DIR: /opt/tiger
+      DUB_VIENEU_ENTRYPOINT: /opt/vieneu/vieneu-offline.py
+      VIENEU_CODEC_PATH: /models/tts/support/neucodec-onnx-int8
+      DUB_ASR_COMPUTE_TYPE: ${DUB_ASR_COMPUTE_TYPE:-float16}
+      DUB_ASR_LANGUAGE_CONFIDENCE_THRESHOLD: ${DUB_ASR_LANGUAGE_CONFIDENCE_THRESHOLD:-0.5}
+      DUB_OFFLINE_WORKER_POLL_SECONDS: ${DUB_OFFLINE_WORKER_POLL_SECONDS:-1.0}
+      DUB_LLAMA_SERVER_BINARY: /usr/local/lib/llama.cpp/llama-server
+      DUB_LLAMA_SERVER_PORT: ${DUB_LLAMA_SERVER_PORT:-18081}
+      DUB_LLAMA_CONTEXT_SIZE: ${DUB_LLAMA_CONTEXT_SIZE:-2048}
+      DUB_LLAMA_MAX_OUTPUT_TOKENS: ${DUB_LLAMA_MAX_OUTPUT_TOKENS:-512}
+      DUB_LLAMA_STARTUP_TIMEOUT_SECONDS: ${DUB_LLAMA_STARTUP_TIMEOUT_SECONDS:-300}
+      DUB_LLAMA_REQUEST_TIMEOUT_SECONDS: ${DUB_LLAMA_REQUEST_TIMEOUT_SECONDS:-180}
+      DUB_TIMING_REWRITE_MAX_ATTEMPTS: ${DUB_TIMING_REWRITE_MAX_ATTEMPTS:-3}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - models:/models:ro
+      - incoming_data:/data/incoming:ro
+      - jobs_data:/data/jobs
+      - output_data:/data/output
+      - job_state:/state
+      - ./config/models.lock.json:/app/config/models.lock.json:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${DUB_GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  model-manager:
+    <<: *app-service
+    profiles: [models]
+    restart: "no"
+    command: ["python3.12", "-m", "dub_server.model_manager", "list", "--lock", "/app/config/models.lock.json"]
+    environment:
+      DUB_MODELS_LOCK_PATH: /app/config/models.lock.json
+      DUB_MODELS_DIR: /models
+    volumes:
+      - models:/models
+      - ./config/models.lock.json:/app/config/models.lock.json:ro
+    networks:
+      - model_egress
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:2.5.2.5491-ls155@sha256:2f3d31307beba3ba2dd226d191f5f5c14ee3b4d8b49277c64683f5ed97083179
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+    ports:
+      - "127.0.0.1:${PROWLARR_PORT:-9696}:9696"
+    volumes:
+      - prowlarr_config:/config
+    networks:
+      - control
+      - prowlarr_egress
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3_v2.0.13-ls469@sha256:b024436f8ca665d16d9a997d26fd27fdf867ee5566ba09f32764e7b2976d3e02
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: ${TORRENTING_PORT:-6881}
+    ports:
+      - "127.0.0.1:${QBITTORRENT_WEBUI_PORT:-8081}:8080"
+      - "${TORRENTING_PORT:-6881}:${TORRENTING_PORT:-6881}/tcp"
+      - "${TORRENTING_PORT:-6881}:${TORRENTING_PORT:-6881}/udp"
+    volumes:
+      - qbittorrent_config:/config
+      - incoming_data:/data/incoming
+    networks:
+      - control
+      - torrent_egress
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+volumes:
+  app_config:
+  job_state:
+  incoming_data:
+  jobs_data:
+  output_data:
+  models:
+  prowlarr_config:
+  qbittorrent_config:
+
+networks:
+  control:
+    internal: true
+  api_egress:
+  model_egress:
+  prowlarr_egress:
+  torrent_egress:
+
+secrets:
+  prowlarr_api_key:
+    file: ${PROWLARR_API_KEY_FILE:-./secrets/prowlarr_api_key.txt}
+  qbittorrent_password:
+    file: ${QBITTORRENT_PASSWORD_FILE:-./secrets/qbittorrent_password.txt}
+  opensubtitles_api_key:
+    file: ${OPENSUBTITLES_API_KEY_FILE:-./secrets/opensubtitles_api_key.txt}
+  opensubtitles_token:
+    file: ${OPENSUBTITLES_TOKEN_FILE:-./secrets/opensubtitles_token.txt}

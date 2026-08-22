@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "authorized-scene-001",
+      "reference_vi": "Bản dịch tham chiếu do người đánh giá cung cấp.",
+      "hypothesis_vi": "Bản dịch hệ thống cần được thay bằng kết quả thật.",
+      "glossary": {
+        "Example": "Ví dụ"
+      },
+      "human": {
+        "adequacy": 3,
+        "fluency": 3,
+        "tts_naturalness": 3,
+        "dialogue_leak": 3
+      }
+    }
+  ]
+}

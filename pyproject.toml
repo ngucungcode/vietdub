@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.46.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vietdub"
+version = "0.3.8"
+description = "Local NVIDIA GPU pipeline for legally acquired Vietnamese video dubbing"
+readme = "README.md"
+requires-python = ">=3.11.0rc1,<3.13"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+dependencies = [
+  "fastapi==0.139.2",
+  "httpx==0.28.1",
+  "pydantic-settings==2.14.2",
+  "typer==0.27.0",
+  "uvicorn[standard]==0.51.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ngucungcode/vietdub"
+Repository = "https://github.com/ngucungcode/vietdub.git"
+Issues = "https://github.com/ngucungcode/vietdub/issues"
+
+[project.optional-dependencies]
+gpu = [
+  "ctranslate2==4.8.1",
+  "faster-whisper==1.2.1",
+  "huggingface-hub==1.5.0",
+  "numpy==2.3.4",
+  "onnxruntime==1.24.4",
+  "piper-tts==1.5.0",
+  "safetensors==0.7.0",
+  "sea-g2p==0.7.20",
+  "soundfile==0.13.1",
+  "soxr==1.0.0",
+  "torch==2.10.0",
+  "transformers==5.5.4",
+]
+managed-gpu = [
+  "ctranslate2==4.8.1",
+  "faster-whisper==1.2.1",
+  "huggingface-hub==1.5.0",
+  "numpy==2.3.4",
+  "onnxruntime==1.24.4",
+  "piper-tts==1.5.0",
+  "safetensors==0.7.0",
+  "sea-g2p==0.7.20",
+  "soundfile==0.13.1",
+  "soxr==1.0.0",
+  "transformers==5.5.4",
+]
+native = [
+  "supervisor==4.3.0",
+]
+lint = [
+  "mypy==1.19.1",
+  "ruff==0.14.4",
+]
+audit = [
+  "pip-audit==2.10.1",
+]
+
+[project.scripts]
+dub = "dub_server.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dub_server = [
+  "web_static/*.html",
+  "web_static/*.png",
+  "web_static/assets/*.css",
+  "web_static/assets/*.js",
+  "web_static/assets/_vinext_fonts/*/*.woff2",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = [
+  "src/dub_server/domain.py",
+  "src/dub_server/offline.py",
+  "src/dub_server/opensubtitles.py",
+  "src/dub_server/volume_init.py",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = [
+  "E501",    # line length is formatter territory, not a gate
+  "B008",    # FastAPI Depends() in defaults is idiomatic
+  "S101",    # asserts are how the test suite works
+  "S603",    # subprocess calls are exec-form with fixed argv lists
+  "S607",    # ffmpeg/piper are resolved via shutil.which by design
+  "S608",    # SQL is built from module-level literals, never request data
+  "RUF001",  # Vietnamese UI strings legitimately use non-ASCII punctuation
+  "RUF002",
+  "RUF003",
+  "RUF043",  # pytest.raises match= patterns are intentionally plain substrings
+  "UP022",   # capture_output= is not equivalent where stderr must stay separate
+  "ASYNC109", # timeout parameters are part of this codebase's stage API contract
+]
+

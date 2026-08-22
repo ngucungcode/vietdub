@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {"architecture": "sm_70", "status": "maintenance-limited", "profiles": ["balanced", "maximum"], "evidence_required": true},
+    {"architecture": "sm_75", "status": "supported", "profiles": ["minimal", "balanced"], "evidence_required": true},
+    {"architecture": "sm_80", "status": "supported", "profiles": ["minimal", "maximum"], "evidence_required": true},
+    {"architecture": "sm_86", "status": "supported", "profiles": ["balanced", "maximum"], "evidence_required": true},
+    {"architecture": "sm_89", "status": "supported", "profiles": ["balanced", "maximum"], "evidence_required": true},
+    {"architecture": "sm_90", "status": "supported", "profiles": ["maximum"], "evidence_required": true},
+    {"architecture": "sm_120", "status": "experimental", "profiles": ["minimal"], "evidence_required": true}
+  ]
+}

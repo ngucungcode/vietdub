@@ -1,4 +1,4 @@
-"""FastAPI control plane for acquisition and durable job orchestration."""
+"""FastAPI upload control plane and durable offline job orchestration."""
 
 import asyncio
 import errno
@@ -17,7 +17,7 @@ from collections.abc import MutableMapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 from weakref import WeakValueDictionary
 
@@ -38,7 +38,6 @@ from . import __version__
 from .admin_integrations import (
     AdminIntegrationError,
     OpenSubtitlesAdminClient,
-    ProwlarrAdminClient,
     atomic_write_secret_bundle,
     can_delete_secret_bundle,
     can_manage_secret_bundle,
@@ -60,11 +59,6 @@ from .config import (
     read_secret,
 )
 from .domain import (
-    AcquisitionError,
-    AcquisitionErrorCode,
-    MediaKind,
-    MediaQuery,
-    ReleaseCandidate,
     SubtitleFormat,
 )
 from .gpu import (
@@ -164,34 +158,6 @@ def _sealed_file_sha256(path: Path) -> tuple[str, int]:
         os.close(descriptor)
 
 
-class AcquisitionPort(Protocol):
-    async def search(
-        self,
-        query: str | MediaQuery,
-        year: int | None = None,
-        media_type: MediaKind | str = MediaKind.MOVIE,
-    ) -> Sequence[ReleaseCandidate]: ...
-
-    async def start_download(
-        self,
-        release: ReleaseCandidate | str,
-        save_path: Path,
-        *,
-        rights_confirmed: bool,
-        paused: bool = False,
-    ) -> Any: ...
-
-
-class CoordinatorPort(Protocol):
-    async def refresh(self, job_id: str) -> JobRecord | None: ...
-
-    async def select_subtitle(
-        self, job_id: str, subtitle_id: str
-    ) -> JobRecord: ...
-
-    async def select_asr(self, job_id: str) -> JobRecord: ...
-
-
 _LOGGER = logging.getLogger(__name__)
 _WEB_STATIC_ROOT = Path(__file__).resolve().with_name("web_static")
 _UPLOAD_DISK_RESERVE_BYTES = 512 * 1024 * 1024
@@ -286,60 +252,6 @@ def _with_gpu_support_tier(report: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-async def _monitor_acquisition_jobs(
-    coordinator: CoordinatorPort,
-    store: StateStore,
-    stop: asyncio.Event,
-    interval_seconds: float,
-) -> None:
-    """Refresh only network acquisition stages; inference stays offline."""
-
-    monitored = (JobStatus.DOWNLOADING, JobStatus.SUBTITLE_MATCHING)
-    while not stop.is_set():
-        for record in store.list_jobs(monitored, limit=100):
-            if stop.is_set():
-                return
-            try:
-                await coordinator.refresh(record.id)
-            except JobNotFound:
-                continue
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Adapter/coordinator errors are expected to be persisted as
-                # typed job failures.  One broken job must not stop monitoring.
-                _LOGGER.exception("Acquisition refresh failed for job %s", record.id)
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
-        except TimeoutError:
-            pass
-
-
-class SearchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    query: str = Field(min_length=1, max_length=300)
-    year: int | None = Field(default=None, ge=1888, le=2200)
-    media_type: Literal["movie"] = "movie"
-
-
-class ReleaseResponse(BaseModel):
-    release_id: str
-    title: str
-    indexer_id: int
-    protocol: str
-    info_hash: str | None = None
-    size_bytes: int | None = None
-    seeders: int | None = None
-    leechers: int | None = None
-    published_at: str | None = None
-    categories: list[str] = Field(default_factory=list)
-
-
-class SearchResponse(BaseModel):
-    results: list[ReleaseResponse]
-
-
 class ModelSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -372,20 +284,6 @@ def _normalized_glossary(value: dict[str, str]) -> dict[str, str]:
 
 
 Glossary = Annotated[dict[str, str], AfterValidator(_normalized_glossary)]
-
-
-class JobCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    release_id: str = Field(min_length=1, max_length=500)
-    rights_confirmed: bool = False
-    source_language: str = Field(default="auto", min_length=2, max_length=35)
-    subtitle_mode: Literal["prefer", "manual", "asr"] = "prefer"
-    timing_profile: Literal["natural", "strict"] = "natural"
-    models: ModelSelection = Field(default_factory=ModelSelection)
-    voice: VoiceSelection | None = None
-    voice_rights_confirmed: bool = False
-    glossary: Glossary = Field(default_factory=dict)
 
 
 class UploadCreateRequest(BaseModel):
@@ -1160,48 +1058,7 @@ class AdminIntegrationStatus(BaseModel):
 class AdminIntegrationsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    prowlarr: AdminIntegrationStatus
     opensubtitles: AdminIntegrationStatus
-
-
-class ProwlarrIndexerResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: int
-    name: str
-    definition_name: str | None = None
-    implementation_name: str | None = None
-    protocol: str | None = None
-    privacy: str | None = None
-    enabled: bool
-    supports_search: bool
-    supports_rss: bool
-    priority: int | None = None
-    disabled_until: str | None = None
-    most_recent_failure: str | None = None
-
-
-class ProwlarrIndexerListResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[ProwlarrIndexerResponse]
-    count: int
-
-
-class ProwlarrTestResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    indexer_id: int
-    ok: bool
-    failure_count: int
-
-
-class ProwlarrTestAllResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    all_ok: bool
-    failed_count: int
-    results: list[ProwlarrTestResult]
 
 
 class OpenSubtitlesConfigureRequest(BaseModel):
@@ -1227,23 +1084,6 @@ class OpenSubtitlesConfigurationResponse(BaseModel):
     quota: dict[str, int | bool | str | None] | None = None
 
 
-def _public_release(candidate: ReleaseCandidate) -> ReleaseResponse:
-    """Never expose provider URLs or opaque GUIDs through the public API."""
-
-    return ReleaseResponse(
-        release_id=candidate.release_id,
-        title=candidate.title,
-        indexer_id=candidate.indexer_id,
-        protocol=candidate.protocol,
-        info_hash=candidate.info_hash,
-        size_bytes=candidate.size_bytes,
-        seeders=candidate.seeders,
-        leechers=candidate.leechers,
-        published_at=candidate.published_at,
-        categories=list(candidate.categories),
-    )
-
-
 def _job_response(record: JobRecord) -> JobResponse:
     return JobResponse.model_validate(record.to_dict())
 
@@ -1254,69 +1094,6 @@ def _adapter_value(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
     return getattr(value, name, default)
-
-
-def _release_snapshot(candidate: ReleaseCandidate) -> dict[str, Any] | None:
-    """Build a restart token without persisting provider URLs or credentials."""
-
-    info_hash = (candidate.info_hash or "").strip().lower()
-    if len(info_hash) != 40 or any(
-        character not in "0123456789abcdef" for character in info_hash
-    ):
-        return None
-    safe_magnet = f"magnet:?xt=urn:btih:{info_hash}"
-    if candidate.download_uri.strip().lower() != safe_magnet:
-        # HTTP URLs and magnets with tracker parameters may contain private
-        # tokens. Re-resolve them from the saved search query after restart.
-        return None
-    return {
-        "release_id": candidate.release_id,
-        "title": candidate.title,
-        "indexer_id": candidate.indexer_id,
-        "protocol": "torrent",
-        "download_uri": safe_magnet,
-        "guid": "",
-        "info_hash": info_hash,
-        "size_bytes": candidate.size_bytes,
-        "seeders": candidate.seeders,
-        "leechers": candidate.leechers,
-        "published_at": candidate.published_at,
-        "categories": list(candidate.categories),
-    }
-
-
-def _release_from_snapshot(
-    payload: object,
-    *,
-    expected_release_id: str,
-) -> ReleaseCandidate | None:
-    if not isinstance(payload, dict):
-        return None
-    try:
-        values = dict(payload)
-        values["categories"] = tuple(values.get("categories") or ())
-        candidate = ReleaseCandidate(**values)
-    except (TypeError, ValueError):
-        return None
-    expected_uri = f"magnet:?xt=urn:btih:{(candidate.info_hash or '').lower()}"
-    if (
-        candidate.release_id != expected_release_id
-        or candidate.guid
-        or candidate.download_uri.lower() != expected_uri
-    ):
-        return None
-    return candidate
-
-
-def _acquisition_error_status(error: AcquisitionError) -> int:
-    code = error.code.value
-    if code == "rights_confirmation_required":
-        return status.HTTP_403_FORBIDDEN
-    if code in {"download_unavailable", "download_not_found"}:
-        return status.HTTP_409_CONFLICT
-    if code == "invalid_response":
-        return status.HTTP_502_BAD_GATEWAY
-    return status.HTTP_503_SERVICE_UNAVAILABLE if error.retryable else 400
 
 
 def _validate_model_selection(
@@ -1382,17 +1159,14 @@ def create_app(
     *,
     settings: Settings | None = None,
     state_store: StateStore | None = None,
-    acquisition_service: AcquisitionPort | None = None,
-    coordinator: CoordinatorPort | None = None,
+    acquisition_service: Any | None = None,
+    coordinator: Any | None = None,
     admin_http_client: httpx.AsyncClient | None = None,
     media_probe: MediaProbe | None = None,
 ) -> FastAPI:
     """Create an app with explicit adapter injection for deterministic tests."""
 
     configured_settings = settings or get_settings()
-    active_job_operations: dict[str, asyncio.Task[Any]] = {}
-    cancellation_reconciliations: dict[str, asyncio.Task[None]] = {}
-    backend_mutation_lock = asyncio.Lock()
     admin_configuration_lock = asyncio.Lock()
     # Upload locks are weakly held: active/waiting coroutines retain their lock,
     # while completed, finalized, or unknown UUID requests cannot grow this
@@ -1401,137 +1175,6 @@ def create_app(
         WeakValueDictionary()
     )
     local_media_probe = media_probe or FfprobeMediaProbe()
-
-    async def mutate_backend(
-        operation: Any,
-        *args: Any,
-        timeout: float | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        async def invoke() -> Any:
-            async with backend_mutation_lock:
-                return await operation(*args, **kwargs)
-
-        if timeout is None:
-            return await invoke()
-        return await asyncio.wait_for(invoke(), timeout=max(0.05, timeout))
-
-    async def pause_backend_for_cancel(
-        store: StateStore,
-        service: Any,
-        job_id: str,
-        task_id: str,
-        *,
-        timeout: float,
-    ) -> str:
-        """Pause one task without racing a new owner's backend mutation."""
-
-        async def pause_if_unowned() -> str:
-            async with backend_mutation_lock:
-                current = store.get_job(job_id)
-                if (
-                    not current.active_slot
-                    and any(
-                        active.id != job_id
-                        for active in store.list_active_jobs(limit=1000)
-                    )
-                ):
-                    return "deferred"
-                pause_download = getattr(service, "pause_download", None)
-                if not callable(pause_download):
-                    return "unsupported"
-                await pause_download(task_id)
-                return "paused"
-
-        try:
-            return await asyncio.wait_for(
-                pause_if_unowned(),
-                timeout=max(0.05, timeout),
-            )
-        except Exception:
-            return "failed"
-
-    def schedule_cancel_reconciliation(
-        owner: asyncio.Task[Any],
-        store: StateStore,
-        service: Any,
-        job_id: str,
-    ) -> None:
-        existing = cancellation_reconciliations.get(job_id)
-        if existing is not None and not existing.done():
-            return
-
-        async def reconcile() -> None:
-            try:
-                await asyncio.shield(owner)
-            except asyncio.CancelledError:
-                if asyncio.current_task() is not None and asyncio.current_task().cancelling():
-                    raise
-            except Exception:  # noqa: S110 - the owner's failure is reported on its own job record
-                pass
-            current = store.get_job(job_id)
-            if current.status is not JobStatus.CANCELLING:
-                return
-            task_id = current.details.get("task_id")
-            if not task_id:
-                store.finalize_cancel(job_id)
-                return
-            result = await pause_backend_for_cancel(
-                store,
-                service,
-                job_id,
-                str(task_id),
-                timeout=1.5,
-            )
-            if result == "paused":
-                store.finalize_cancel(job_id)
-            elif result == "deferred":
-                store.append_warning(
-                    job_id,
-                    "backend_cleanup_deferred",
-                    "Chưa dừng torrent cũ vì một job khác đang hoạt động",
-                )
-            else:
-                store.append_warning(
-                    job_id,
-                    "download_pause_failed",
-                    "Chưa thể hoàn tất hủy torrent sau thao tác tải đang chạy",
-                )
-
-        task = asyncio.create_task(
-            reconcile(),
-            name=f"cancel-reconcile-{job_id}",
-        )
-        cancellation_reconciliations[job_id] = task
-
-        def discard(completed: asyncio.Task[None]) -> None:
-            if cancellation_reconciliations.get(job_id) is completed:
-                cancellation_reconciliations.pop(job_id, None)
-
-        task.add_done_callback(discard)
-
-    def track_job_operation(job_id: str) -> None:
-        """Expose in-flight torrent mutations to the cancellation endpoint.
-
-        Cancellation first records the durable CANCELLING state.  The request
-        that currently owns a qBittorrent mutation then performs the final
-        pause, which prevents a late resume/add call from running after a
-        cancellation has already been finalized.
-        """
-
-        task = asyncio.current_task()
-        if task is None:
-            return
-        existing = active_job_operations.get(job_id)
-        if existing is not None and existing is not task and not existing.done():
-            raise InvalidTransition("Job đang có một thao tác tải nguồn khác")
-        active_job_operations[job_id] = task
-
-        def discard(completed: asyncio.Task[Any]) -> None:
-            if active_job_operations.get(job_id) is completed:
-                active_job_operations.pop(job_id, None)
-
-        task.add_done_callback(discard)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -1564,158 +1207,8 @@ def create_app(
             configured_settings,
             application.state.job_store,
         )
-        for interrupted in application.state.job_store.list_jobs(
-            (JobStatus.CREATED,),
-            limit=1000,
-        ):
-            application.state.job_store.update_status(
-                interrupted.id,
-                JobStatus.FAILED,
-                error_code="download_start_interrupted",
-                error_message=(
-                    "API đã dừng khi đang khởi tạo tải nguồn; hãy chọn Tiếp tục"
-                ),
-                retryable=True,
-            )
-        client: httpx.AsyncClient | None = None
-        configured_acquisition = acquisition_service
-        if configured_acquisition is None:
-            prowlarr_key = read_secret(configured_settings.prowlarr_api_key_file)
-            qbittorrent_password = read_secret(
-                configured_settings.qbittorrent_password_file
-            )
-            if prowlarr_key and qbittorrent_password:
-                from .acquisition import build_acquisition_service
-
-                (
-                    opensubtitles_api_key,
-                    opensubtitles_token,
-                    opensubtitles_api_root,
-                ) = _acquisition_opensubtitles_configuration(configured_settings)
-                client = httpx.AsyncClient(follow_redirects=False)
-                configured_acquisition = build_acquisition_service(
-                    client=client,
-                    prowlarr_url=configured_settings.prowlarr_url,
-                    prowlarr_api_key=prowlarr_key,
-                    qbittorrent_url=configured_settings.qbittorrent_url,
-                    qbittorrent_username=configured_settings.qbittorrent_username,
-                    qbittorrent_password=qbittorrent_password,
-                    opensubtitles_api_key=opensubtitles_api_key,
-                    opensubtitles_token=opensubtitles_token,
-                    opensubtitles_base_url=opensubtitles_api_root,
-                    opensubtitles_user_agent=(
-                        configured_settings.opensubtitles_user_agent
-                    ),
-                )
-        configured_coordinator = coordinator
-        if configured_coordinator is None and configured_acquisition is not None:
-            from .acquisition.coordinator import AcquisitionCoordinator
-
-            configured_coordinator = AcquisitionCoordinator(
-                configured_acquisition,
-                application.state.job_store,
-                configured_settings.incoming_dir,
-                configured_settings.jobs_dir,
-            )
-        application.state.acquisition = configured_acquisition
-        application.state.coordinator = configured_coordinator
-        for pending_start in application.state.job_store.list_jobs(
-            (JobStatus.DOWNLOADING,),
-            limit=1000,
-        ):
-            if pending_start.details.get("backend_started") is not False:
-                continue
-            task_id = pending_start.details.get("task_id")
-            resume_download = getattr(configured_acquisition, "resume_download", None)
-            if not task_id or not callable(resume_download):
-                application.state.job_store.update_status(
-                    pending_start.id,
-                    JobStatus.FAILED,
-                    error_code="download_start_interrupted",
-                    error_message=(
-                        "API đã dừng trước khi xác nhận trình tải nguồn bắt đầu"
-                    ),
-                    retryable=True,
-                )
-                continue
-            try:
-                await mutate_backend(
-                    resume_download,
-                    str(task_id),
-                    timeout=15.0,
-                )
-            except Exception:
-                pause_result = await pause_backend_for_cancel(
-                    application.state.job_store,
-                    configured_acquisition,
-                    pending_start.id,
-                    str(task_id),
-                    timeout=1.5,
-                )
-                message = (
-                    "Không thể khôi phục trình tải nguồn sau khi API khởi động lại"
-                )
-                if pause_result == "paused":
-                    application.state.job_store.update_status(
-                        pending_start.id,
-                        JobStatus.FAILED,
-                        error_code="download_start_interrupted",
-                        error_message=message,
-                        retryable=True,
-                    )
-                else:
-                    application.state.job_store.update_status(
-                        pending_start.id,
-                        JobStatus.DOWNLOADING,
-                        details={
-                            **pending_start.details,
-                            "backend_started": True,
-                            "backend_state_uncertain": True,
-                        },
-                        error_code="download_start_interrupted",
-                        error_message=message,
-                        retryable=True,
-                        expected_status=JobStatus.DOWNLOADING,
-                    )
-            else:
-                application.state.job_store.update_status(
-                    pending_start.id,
-                    JobStatus.DOWNLOADING,
-                    details={
-                        **pending_start.details,
-                        "backend_started": True,
-                    },
-                    expected_status=JobStatus.DOWNLOADING,
-                )
-        for pending_cancel in application.state.job_store.list_jobs(
-            (JobStatus.CANCELLING,),
-            limit=1000,
-        ):
-            task_id = pending_cancel.details.get("task_id")
-            if not task_id:
-                application.state.job_store.finalize_cancel(pending_cancel.id)
-            else:
-                pause_result = await pause_backend_for_cancel(
-                    application.state.job_store,
-                    configured_acquisition,
-                    pending_cancel.id,
-                    str(task_id),
-                    timeout=1.5,
-                )
-                if pause_result == "paused":
-                    application.state.job_store.finalize_cancel(pending_cancel.id)
-                elif pause_result == "deferred":
-                    application.state.job_store.append_warning(
-                        pending_cancel.id,
-                        "backend_cleanup_deferred",
-                        "Chưa dừng torrent cũ vì một job khác đang hoạt động",
-                    )
-                else:
-                    application.state.job_store.append_warning(
-                        pending_cancel.id,
-                        "download_pause_failed",
-                        "Chưa thể hoàn tất hủy torrent sau khi API khởi động lại",
-                    )
+        application.state.acquisition = None
+        application.state.coordinator = None
         upload_cleanup_stop = asyncio.Event()
         upload_cleanup_interval = max(
             60.0,
@@ -1732,19 +1225,6 @@ def create_app(
             name="upload-session-cleanup",
         )
         application.state.upload_cleanup_task = upload_cleanup_task
-        monitor_stop = asyncio.Event()
-        monitor_task: asyncio.Task[None] | None = None
-        if configured_coordinator is not None:
-            monitor_task = asyncio.create_task(
-                _monitor_acquisition_jobs(
-                    configured_coordinator,
-                    application.state.job_store,
-                    monitor_stop,
-                    configured_settings.acquisition_monitor_seconds,
-                ),
-                name="acquisition-job-monitor",
-            )
-        application.state.acquisition_monitor_task = monitor_task
         try:
             yield
         finally:
@@ -1752,28 +1232,13 @@ def create_app(
             upload_cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await upload_cleanup_task
-            monitor_stop.set()
-            if monitor_task is not None:
-                monitor_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await monitor_task
-            pending_reconciliations = tuple(cancellation_reconciliations.values())
-            for reconciliation in pending_reconciliations:
-                reconciliation.cancel()
-            if pending_reconciliations:
-                await asyncio.gather(
-                    *pending_reconciliations,
-                    return_exceptions=True,
-                )
-            if client is not None:
-                await client.aclose()
             if owned_admin_client is not None:
                 await owned_admin_client.aclose()
 
     application = FastAPI(
         title="VietDub",
         version=__version__,
-        description="Điều khiển tải nguồn hợp pháp và pipeline thuyết minh cục bộ.",
+        description="Nhận MP4/MKV hợp pháp và chạy pipeline thuyết minh cục bộ.",
         lifespan=lifespan,
     )
     application.state.settings = configured_settings
@@ -1870,32 +1335,6 @@ def create_app(
     def job_store(request: Request) -> StateStore:
         return request.app.state.job_store
 
-    def acquisition(request: Request) -> AcquisitionPort:
-        service = request.app.state.acquisition
-        if service is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "acquisition_not_configured",
-                    "message": "Dịch vụ tìm kiếm và tải nguồn chưa được cấu hình",
-                    "retryable": True,
-                },
-            )
-        return service
-
-    def job_coordinator(request: Request) -> CoordinatorPort:
-        configured = request.app.state.coordinator
-        if configured is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "coordinator_not_configured",
-                    "message": "Bộ điều phối tải nguồn chưa được cấu hình",
-                    "retryable": True,
-                },
-            )
-        return configured
-
     def local_admin_request(
         request: Request,
         marker: Annotated[
@@ -1933,39 +1372,7 @@ def create_app(
             },
         )
 
-    def prowlarr_admin(request: Request) -> ProwlarrAdminClient:
-        try:
-            api_key = read_secret(configured_settings.prowlarr_api_key_file)
-        except OSError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "prowlarr_secret_unreadable",
-                    "message": "Không thể đọc khóa API Prowlarr",
-                    "retryable": False,
-                },
-            ) from exc
-        if api_key is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "prowlarr_not_configured",
-                    "message": "Prowlarr chưa được cấu hình",
-                    "retryable": False,
-                },
-            )
-        try:
-            return ProwlarrAdminClient(
-                base_url=configured_settings.prowlarr_url,
-                api_key=api_key,
-                client=request.app.state.admin_http_client,
-            )
-        except AdminIntegrationError as exc:
-            raise admin_error(exc) from exc
-
     StoreDependency = Annotated[StateStore, Depends(job_store)]
-    AcquisitionDependency = Annotated[AcquisitionPort, Depends(acquisition)]
-    CoordinatorDependency = Annotated[CoordinatorPort, Depends(job_coordinator)]
     LocalAdminDependency = Annotated[None, Depends(local_admin_request)]
 
     @application.get("/v1/health")
@@ -2002,7 +1409,6 @@ def create_app(
         degraded = (
             not gpu_report.get("ready", False)
             or catalog_status != "ok"
-            or request.app.state.acquisition is None
         )
         payload = {
             "status": "error" if not healthy else ("degraded" if degraded else "ok"),
@@ -2016,8 +1422,6 @@ def create_app(
                 "status": catalog_status,
                 "count": model_count,
             },
-            "acquisition_configured": request.app.state.acquisition is not None,
-            "coordinator_configured": request.app.state.coordinator is not None,
             "gpu": gpu_report,
         }
         if not healthy:
@@ -2031,6 +1435,7 @@ def create_app(
     def capabilities() -> dict[str, Any]:
         return {
             "api_version": "v1",
+            "source_modes": ["upload"],
             "media_types": ["movie"],
             "subtitle_modes": ["prefer", "manual", "asr"],
             "source_language": {
@@ -2074,12 +1479,6 @@ def create_app(
         _admin: LocalAdminDependency,
     ) -> AdminIntegrationsResponse:
         try:
-            prowlarr_configured = (
-                read_secret(configured_settings.prowlarr_api_key_file) is not None
-            )
-        except OSError:
-            prowlarr_configured = False
-        try:
             opensubtitles_api_key = read_secret(
                 configured_settings.opensubtitles_api_key_file
             )
@@ -2120,11 +1519,6 @@ def create_app(
             and (opensubtitles_configured or cleanup_pending)
         )
         return AdminIntegrationsResponse(
-            prowlarr=AdminIntegrationStatus(
-                configured=prowlarr_configured,
-                editable=False,
-                can_manage=False,
-            ),
             opensubtitles=AdminIntegrationStatus(
                 configured=opensubtitles_configured,
                 editable=editable,
@@ -2133,37 +1527,6 @@ def create_app(
                 can_delete=can_delete,
             ),
         )
-
-    @application.get(
-        "/v1/admin/prowlarr/indexers",
-        response_model=ProwlarrIndexerListResponse,
-    )
-    async def admin_prowlarr_indexers(
-        request: Request,
-        _admin: LocalAdminDependency,
-    ) -> ProwlarrIndexerListResponse:
-        adapter = prowlarr_admin(request)
-        try:
-            items = await adapter.list_indexers()
-        except AdminIntegrationError as exc:
-            raise admin_error(exc) from exc
-        validated = [ProwlarrIndexerResponse.model_validate(item) for item in items]
-        return ProwlarrIndexerListResponse(items=validated, count=len(validated))
-
-    @application.post(
-        "/v1/admin/prowlarr/test-all",
-        response_model=ProwlarrTestAllResponse,
-    )
-    async def admin_prowlarr_test_all(
-        request: Request,
-        _admin: LocalAdminDependency,
-    ) -> ProwlarrTestAllResponse:
-        adapter = prowlarr_admin(request)
-        try:
-            payload = await adapter.test_all()
-        except AdminIntegrationError as exc:
-            raise admin_error(exc) from exc
-        return ProwlarrTestAllResponse.model_validate(payload)
 
     @application.put(
         "/v1/admin/opensubtitles",
@@ -2975,358 +2338,13 @@ def create_app(
                 ) from exc
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    @application.post("/v1/search", response_model=SearchResponse)
-    async def search(
-        payload: SearchRequest,
-        service: AcquisitionDependency,
-    ) -> SearchResponse:
-        query = " ".join(payload.query.split())
-        if not query:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "empty_query",
-                    "message": "Từ khóa tìm kiếm không được để trống",
-                    "retryable": False,
-                },
-            )
-        try:
-            results = await service.search(
-                MediaQuery(
-                    query=query,
-                    year=payload.year,
-                    media_kind=MediaKind(payload.media_type),
-                )
-            )
-        except AcquisitionError as exc:
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                },
-            ) from exc
-        return SearchResponse(results=[_public_release(item) for item in results])
+    @application.post("/v1/search", include_in_schema=False)
+    async def search_removed() -> None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
-    @application.post(
-        "/v1/jobs",
-        response_model=JobResponse,
-        status_code=status.HTTP_202_ACCEPTED,
-    )
-    async def create_job(
-        payload: JobCreateRequest,
-        store: StoreDependency,
-        service: AcquisitionDependency,
-    ) -> JobResponse:
-        if payload.rights_confirmed is not True:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "rights_confirmation_required",
-                    "message": "Bạn phải xác nhận có quyền tải và xử lý nội dung này",
-                    "retryable": False,
-                },
-            )
-        if payload.voice is not None and payload.voice_rights_confirmed is not True:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "code": "voice_rights_confirmation_required",
-                    "message": "Bạn phải xác nhận có quyền sử dụng giọng tham chiếu",
-                    "retryable": False,
-                },
-            )
-
-        try:
-            catalog = load_model_catalog(
-                configured_settings.models_lock_path,
-                configured_settings.models_dir,
-            )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "model_catalog_unavailable",
-                    "message": "Danh mục model cục bộ chưa sẵn sàng",
-                    "retryable": False,
-                },
-            ) from exc
-        effective_models = ModelSelection(
-            asr=(payload.models.asr or configured_settings.default_asr_model_id),
-            translation=(
-                payload.models.translation
-                or configured_settings.default_translation_model_id
-            ),
-            separation=(
-                payload.models.separation
-                or configured_settings.default_separation_model_id
-            ),
-            tts=(payload.models.tts or configured_settings.default_tts_model_id),
-        )
-        _validate_model_selection(
-            effective_models,
-            catalog,
-            gpu_report=read_gpu_report(
-                configured_settings.gpu_report_path,
-                max_age_seconds=configured_settings.gpu_report_max_age_seconds,
-            ),
-        )
-
-        active_jobs = store.list_active_jobs(limit=1)
-        if active_jobs:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "active_job_exists",
-                    "message": "Đã có một job nặng đang hoạt động trên GPU",
-                    "retryable": True,
-                    "active_job_id": active_jobs[0].id,
-                },
-            )
-
-        spec = payload.model_dump(mode="json")
-        # Freeze defaults into the durable job so changing server config can
-        # never silently switch a resumed inference job to a different model.
-        spec["models"] = effective_models.model_dump(mode="json")
-        release_lookup = getattr(service, "release", None)
-        selected_release = (
-            release_lookup(payload.release_id) if callable(release_lookup) else None
-        )
-        query_lookup = getattr(service, "release_query", None)
-        release_query = (
-            query_lookup(payload.release_id) if callable(query_lookup) else None
-        )
-        if isinstance(release_query, MediaQuery):
-            spec["year"] = release_query.year
-            spec["media_type"] = release_query.media_kind.value
-            spec["search_query"] = release_query.query
-
-        try:
-            record = store.create_job(
-                payload.release_id,
-                spec,
-            )
-        except ActiveJobExists as exc:
-            active = store.list_active_jobs(limit=1)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "active_job_exists",
-                    "message": str(exc),
-                    "retryable": True,
-                    "active_job_id": active[0].id if active else None,
-                },
-            ) from exc
-        if isinstance(selected_release, ReleaseCandidate):
-            restart_token = _release_snapshot(selected_release)
-            if restart_token is not None:
-                store.save_checkpoint(
-                    record.id,
-                    JobStage.ACQUISITION,
-                    {"release": restart_token},
-                )
-        track_job_operation(record.id)
-        destination = configured_settings.incoming_dir / record.id
-        created_task_id: str | None = None
-        created_task_name = ""
-        created_resume_attempted = False
-
-        async def settle_created_task_cancel() -> JobRecord:
-            current = store.get_job(record.id)
-            if created_task_id is None or current.status is JobStatus.CANCELLED:
-                return current
-            current = store.update_status(
-                record.id,
-                current.status,
-                details={
-                    **current.details,
-                    "task_id": created_task_id,
-                    "name": created_task_name,
-                },
-            )
-            pause_result = await pause_backend_for_cancel(
-                store,
-                service,
-                record.id,
-                created_task_id,
-                timeout=1.5,
-            )
-            if pause_result != "paused":
-                warning_code = (
-                    "backend_cleanup_deferred"
-                    if pause_result == "deferred"
-                    else "download_pause_failed"
-                )
-                return store.append_warning(
-                    record.id,
-                    warning_code,
-                    "Job đã hủy nhưng chưa thể tạm dừng torrent; dữ liệu nguồn vẫn được giữ lại",
-                )
-            return store.finalize_cancel(record.id)
-
-        async def fail_created_download(
-            code: str,
-            message: str,
-            *,
-            retryable: bool,
-        ) -> JobRecord:
-            current = store.get_job(record.id)
-            if created_resume_attempted and created_task_id is not None:
-                pause_result = await pause_backend_for_cancel(
-                    store,
-                    service,
-                    record.id,
-                    created_task_id,
-                    timeout=1.5,
-                )
-                if pause_result != "paused":
-                    return store.update_status(
-                        current.id,
-                        current.status,
-                        details={
-                            **current.details,
-                            "task_id": created_task_id,
-                            "name": created_task_name,
-                            "backend_started": True,
-                            "backend_state_uncertain": True,
-                        },
-                        error_code=code,
-                        error_message=message,
-                        retryable=True,
-                    )
-            return store.update_status(
-                current.id,
-                JobStatus.FAILED,
-                error_code=code,
-                error_message=message,
-                retryable=retryable,
-            )
-
-        try:
-            task = await mutate_backend(
-                service.start_download,
-                payload.release_id,
-                destination,
-                rights_confirmed=True,
-                paused=True,
-            )
-            created_task_id = str(_adapter_value(task, "task_id", ""))
-            created_task_name = str(_adapter_value(task, "name", ""))
-            if not created_task_id:
-                raise RuntimeError("Download adapter returned no task id")
-            current = store.get_job(record.id)
-            if current.status in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
-                return _job_response(await settle_created_task_cancel())
-            record = store.update_status(
-                record.id,
-                JobStatus.DOWNLOADING,
-                stage=JobStage.ACQUISITION,
-                details={
-                    "task_id": created_task_id,
-                    "name": created_task_name,
-                    "downloaded_bytes": 0,
-                    "total_bytes": None,
-                    "speed_bytes_per_second": 0,
-                    "eta_seconds": None,
-                    "backend_started": False,
-                },
-            )
-            store.save_checkpoint(
-                record.id,
-                JobStage.ACQUISITION,
-                {"task_id": created_task_id},
-            )
-            current = store.get_job(record.id)
-            if current.status in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
-                return _job_response(await settle_created_task_cancel())
-            resume_download = getattr(service, "resume_download", None)
-            if not callable(resume_download):
-                raise RuntimeError("Acquisition service has no resume method")
-            created_resume_attempted = True
-            await mutate_backend(resume_download, created_task_id)
-            current = store.get_job(record.id)
-            if current.status in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
-                return _job_response(await settle_created_task_cancel())
-            record = store.update_status(
-                record.id,
-                JobStatus.DOWNLOADING,
-                details={**current.details, "backend_started": True},
-                expected_status=JobStatus.DOWNLOADING,
-            )
-        except AcquisitionError as exc:
-            current = store.get_job(record.id)
-            if current.status is JobStatus.CANCELLING:
-                if created_task_id is not None:
-                    return _job_response(await settle_created_task_cancel())
-                return _job_response(store.finalize_cancel(record.id))
-            if current.status is JobStatus.CANCELLED:
-                return _job_response(current)
-            await fail_created_download(
-                exc.code.value,
-                exc.message_vi,
-                retryable=exc.retryable,
-            )
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                    "job_id": record.id,
-                },
-            ) from exc
-        except ActiveJobExists as exc:
-            active = store.list_active_jobs(limit=1)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "active_job_exists",
-                    "message": str(exc),
-                    "retryable": True,
-                    "active_job_id": active[0].id if active else None,
-                },
-            ) from exc
-        except InvalidTransition as exc:
-            current = store.get_job(record.id)
-            if current.status is JobStatus.CANCELLING:
-                if created_task_id is not None:
-                    return _job_response(await settle_created_task_cancel())
-                return _job_response(store.finalize_cancel(record.id))
-            if current.status is JobStatus.CANCELLED:
-                return _job_response(current)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "invalid_job_transition",
-                    "message": str(exc),
-                    "retryable": False,
-                },
-            ) from exc
-        except Exception as exc:
-            current = store.get_job(record.id)
-            if current.status is JobStatus.CANCELLING:
-                if created_task_id is not None:
-                    return _job_response(await settle_created_task_cancel())
-                return _job_response(store.finalize_cancel(record.id))
-            if current.status is JobStatus.CANCELLED:
-                return _job_response(current)
-            message = "Không thể khởi tạo tác vụ tải nguồn"
-            await fail_created_download(
-                "download_start_failed",
-                message,
-                retryable=True,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "download_start_failed",
-                    "message": message,
-                    "retryable": True,
-                    "job_id": record.id,
-                },
-            ) from exc
-        return _job_response(record)
+    @application.post("/v1/jobs", include_in_schema=False)
+    async def create_release_job_removed() -> None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
     @application.get("/v1/jobs", response_model=JobListResponse)
     def list_jobs(
@@ -3655,172 +2673,14 @@ def create_app(
                 },
             ) from exc
 
-    @application.post("/v1/jobs/{job_id}/refresh", response_model=JobResponse)
-    async def refresh_job(
-        job_id: str,
-        store: StoreDependency,
-        configured: CoordinatorDependency,
-    ) -> JobResponse:
-        try:
-            store.get_job(job_id)
-            refreshed = await configured.refresh(job_id)
-            record = refreshed if isinstance(refreshed, JobRecord) else store.get_job(job_id)
-            return _job_response(record)
-        except JobNotFound as exc:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "job_not_found",
-                    "message": "Không tìm thấy job",
-                    "retryable": False,
-                },
-            ) from exc
-        except InvalidTransition as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "invalid_job_transition",
-                    "message": str(exc),
-                    "retryable": False,
-                },
-            ) from exc
-        except AcquisitionError as exc:
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                },
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "refresh_failed",
-                    "message": "Không thể cập nhật tiến độ tải nguồn",
-                    "retryable": True,
-                },
-            ) from exc
-
-    @application.post(
-        "/v1/jobs/{job_id}/subtitles/use-asr",
-        response_model=JobResponse,
-    )
-    async def select_asr_for_job(
-        job_id: str,
-        store: StoreDependency,
-        configured: CoordinatorDependency,
-    ) -> JobResponse:
-        try:
-            store.get_job(job_id)
-            return _job_response(await configured.select_asr(job_id))
-        except JobNotFound as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "code": "job_not_found",
-                    "message": "Không tìm thấy job",
-                    "retryable": False,
-                },
-            ) from exc
-        except ActiveJobExists as exc:
-            active = store.list_active_jobs(limit=1)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "active_job_exists",
-                    "message": str(exc),
-                    "retryable": True,
-                    "active_job_id": active[0].id if active else None,
-                },
-            ) from exc
-        except AcquisitionError as exc:
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                },
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "subtitle_selection_failed",
-                    "message": "Không thể xác nhận dùng nhận dạng giọng nói",
-                    "retryable": True,
-                },
-            ) from exc
-
-    @application.post(
-        "/v1/jobs/{job_id}/subtitles/{subtitle_id}",
-        response_model=JobResponse,
-    )
-    async def select_subtitle_for_job(
-        job_id: str,
-        subtitle_id: str,
-        store: StoreDependency,
-        configured: CoordinatorDependency,
-    ) -> JobResponse:
-        try:
-            store.get_job(job_id)
-            return _job_response(
-                await configured.select_subtitle(job_id, subtitle_id)
-            )
-        except JobNotFound as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "code": "job_not_found",
-                    "message": "Không tìm thấy job",
-                    "retryable": False,
-                },
-            ) from exc
-        except ActiveJobExists as exc:
-            active = store.list_active_jobs(limit=1)
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "active_job_exists",
-                    "message": str(exc),
-                    "retryable": True,
-                    "active_job_id": active[0].id if active else None,
-                },
-            ) from exc
-        except AcquisitionError as exc:
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                },
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "subtitle_selection_failed",
-                    "message": "Không thể sử dụng phụ đề đã chọn",
-                    "retryable": True,
-                },
-            ) from exc
-
     @application.post("/v1/jobs/{job_id}/cancel", response_model=JobResponse)
-    async def cancel_job(
-        job_id: str,
-        request: Request,
-        store: StoreDependency,
-    ) -> JobResponse:
+    def cancel_job(job_id: str, store: StoreDependency) -> JobResponse:
         try:
             current = store.get_job(job_id)
             if current.status is JobStatus.CANCELLED:
                 return _job_response(current)
-            offline_running = current.status in {
+            running = current.status in {
                 JobStatus.TRANSCRIBING,
-                JobStatus.SUBTITLE_SELECTED,
                 JobStatus.TRANSLATING,
                 JobStatus.SEPARATING,
                 JobStatus.SYNTHESIZING,
@@ -3829,524 +2689,53 @@ def create_app(
                 JobStatus.MUXING,
                 JobStatus.VERIFYING,
             }
-            offline_idle = current.status in {
-                JobStatus.READY_OFFLINE,
-                JobStatus.NEEDS_LANGUAGE,
-                JobStatus.READY_TRANSLATION,
-                JobStatus.READY_TTS,
-            } or (
-                current.status in {JobStatus.PAUSED, JobStatus.FAILED}
-                and current.previous_status
-                in {
-                    JobStatus.READY_OFFLINE,
-                    JobStatus.TRANSCRIBING,
-                    JobStatus.SUBTITLE_SELECTED,
-                    JobStatus.NEEDS_LANGUAGE,
-                    JobStatus.READY_TRANSLATION,
-                    JobStatus.TRANSLATING,
-                    JobStatus.READY_TTS,
-                    JobStatus.SEPARATING,
-                    JobStatus.SYNTHESIZING,
-                    JobStatus.TIMING,
-                    JobStatus.MIXING,
-                    JobStatus.MUXING,
-                    JobStatus.VERIFYING,
-                }
-            )
-            if offline_running or offline_idle or bool(
-                current.details.get("offline_cancel_pending")
-            ):
-                cancelled = store.request_cancel(job_id)
-                if offline_running:
-                    cancelled = store.update_status(
-                        job_id,
-                        JobStatus.CANCELLING,
-                        expected_status=JobStatus.CANCELLING,
-                        details={
-                            **cancelled.details,
-                            "offline_cancel_pending": True,
-                        },
-                        cancel_requested=True,
-                    )
-                    # The worker owns native/GPU cleanup and finalizes only
-                    # after inference has returned and VRAM is released.
-                    return _job_response(cancelled)
-                if bool(cancelled.details.get("offline_cancel_pending")):
-                    return _job_response(cancelled)
-                return _job_response(store.finalize_cancel(job_id))
             cancelled = store.request_cancel(job_id)
-            if cancelled.status is JobStatus.CANCELLED:
-                return _job_response(cancelled)
-            in_flight = active_job_operations.get(job_id)
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + 1.8
-            if (
-                in_flight is not None
-                and in_flight is not asyncio.current_task()
-                and not in_flight.done()
-            ):
-                # Give a nearly-complete owner a chance to perform its ordered
-                # compensation. Long adapter calls keep the durable
-                # CANCELLING state and finish the pause themselves later.
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(in_flight),
-                        timeout=max(0.0, deadline - loop.time()),
-                    )
-                except TimeoutError:
-                    schedule_cancel_reconciliation(
-                        in_flight,
-                        store,
-                        getattr(request.app.state, "acquisition", None),
-                        job_id,
-                    )
-                    return _job_response(store.get_job(job_id))
-                except asyncio.CancelledError:
-                    current_task = asyncio.current_task()
-                    if current_task is not None and current_task.cancelling():
-                        raise
-                except Exception:  # noqa: S110 - the store is re-read below to decide the real outcome
-                    pass
-                cancelled = store.get_job(job_id)
-                if cancelled.status is JobStatus.CANCELLED:
-                    return _job_response(cancelled)
-            task_id = cancelled.details.get("task_id")
-            service = getattr(request.app.state, "acquisition", None)
-            if task_id:
-                pause_result = await pause_backend_for_cancel(
-                    store,
-                    service,
+            if running:
+                cancelled = store.update_status(
                     job_id,
-                    str(task_id),
-                    timeout=max(0.05, deadline - loop.time()),
+                    JobStatus.CANCELLING,
+                    expected_status=JobStatus.CANCELLING,
+                    details={**cancelled.details, "offline_cancel_pending": True},
+                    cancel_requested=True,
                 )
-                if pause_result == "paused":
-                    cancelled = store.finalize_cancel(job_id)
-                elif pause_result == "deferred":
-                    cancelled = store.append_warning(
-                        job_id,
-                        "backend_cleanup_deferred",
-                        "Chưa dừng torrent cũ vì một job khác đang hoạt động",
-                    )
-                else:
-                    cancelled = store.append_warning(
-                        job_id,
-                        "download_pause_failed",
-                        "Job đã hủy nhưng chưa thể tạm dừng torrent; dữ liệu nguồn vẫn được giữ lại",
-                    )
-            else:
+            elif cancelled.status is not JobStatus.CANCELLED:
                 cancelled = store.finalize_cancel(job_id)
             return _job_response(cancelled)
         except JobNotFound as exc:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "job_not_found",
-                    "message": "Không tìm thấy job",
-                    "retryable": False,
-                },
-            ) from exc
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except InvalidTransition as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "invalid_job_transition",
-                    "message": str(exc),
-                    "retryable": False,
-                },
-            ) from exc
-        except AcquisitionError as exc:
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                },
-            ) from exc
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     @application.post("/v1/jobs/{job_id}/resume", response_model=JobResponse)
-    async def resume_job(
-        job_id: str,
-        store: StoreDependency,
-        service: AcquisitionDependency,
-    ) -> JobResponse:
-        operation_task_id: str | None = None
-        operation_task_name = ""
-        owns_operation = False
-        resume_attempted = False
-
-        async def settle_operation_cancel(task_id: str) -> JobRecord | None:
-            current = store.get_job(job_id)
-            if current.status not in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
-                return None
-            if current.status is JobStatus.CANCELLED:
-                return current
-            current = store.update_status(
-                job_id,
-                current.status,
-                details={
-                    **current.details,
-                    "task_id": task_id,
-                    "name": operation_task_name or current.details.get("name", ""),
-                },
-            )
-            pause_result = await pause_backend_for_cancel(
-                store,
-                service,
-                job_id,
-                task_id,
-                timeout=1.5,
-            )
-            if pause_result == "paused":
-                if current.status is JobStatus.CANCELLING:
-                    current = store.finalize_cancel(job_id)
-            elif pause_result == "deferred":
-                current = store.append_warning(
-                    job_id,
-                    "backend_cleanup_deferred",
-                    "Chưa dừng torrent cũ vì một job khác đang hoạt động",
-                )
-            else:
-                current = store.append_warning(
-                    job_id,
-                    "download_pause_failed",
-                    "Job đã hủy nhưng chưa thể tạm dừng torrent; dữ liệu nguồn vẫn được giữ lại",
-                )
-            return current
-
-        async def fail_resume_download(
-            code: str,
-            message: str,
-            *,
-            retryable: bool,
-        ) -> JobRecord:
-            current = store.get_job(job_id)
-            if resume_attempted and operation_task_id is not None:
-                pause_result = await pause_backend_for_cancel(
-                    store,
-                    service,
-                    job_id,
-                    operation_task_id,
-                    timeout=1.5,
-                )
-                if pause_result not in {"paused", "deferred"} and current.active_slot:
-                    return store.update_status(
-                        current.id,
-                        current.status,
-                        details={
-                            **current.details,
-                            "task_id": operation_task_id,
-                            "name": operation_task_name,
-                            "backend_started": True,
-                            "backend_state_uncertain": True,
-                        },
-                        error_code=code,
-                        error_message=message,
-                        retryable=True,
-                    )
-            return store.update_status(
-                current.id,
-                JobStatus.FAILED,
-                error_code=code,
-                error_message=message,
-                retryable=retryable,
-                force=(current.status is JobStatus.PAUSED),
-            )
-
+    def resume_job(job_id: str, store: StoreDependency) -> JobResponse:
         try:
-            initial = store.get_job(job_id)
-            initial_task_id = initial.details.get("task_id")
-            if initial_task_id:
-                operation_task_id = str(initial_task_id)
-                operation_task_name = str(initial.details.get("name", ""))
-            track_job_operation(job_id)
-            owns_operation = True
-            active_jobs = [
-                active
-                for active in store.list_active_jobs(limit=2)
-                if active.id != job_id
-            ]
-            if active_jobs:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "active_job_exists",
-                        "message": "Đã có một job nặng đang hoạt động trên GPU",
-                        "retryable": True,
-                        "active_job_id": active_jobs[0].id,
-                    },
-                )
             record = store.resume(job_id)
-            if record.status in {
-                JobStatus.READY_OFFLINE,
-                JobStatus.TRANSCRIBING,
-                JobStatus.SUBTITLE_SELECTED,
-                JobStatus.NEEDS_LANGUAGE,
-                JobStatus.READY_TRANSLATION,
-                JobStatus.TRANSLATING,
-                JobStatus.READY_TTS,
-                JobStatus.SEPARATING,
-                JobStatus.SYNTHESIZING,
-                JobStatus.TIMING,
-                JobStatus.MIXING,
-                JobStatus.MUXING,
-                JobStatus.VERIFYING,
-            }:
-                # Offline stages are resumed by the GPU worker from their
-                # durable artifact/checkpoint. A completed torrent task ID in
-                # details must never route this request back to qBittorrent.
-                return _job_response(record)
-            resume_download = getattr(service, "resume_download", None)
-            task_id = record.details.get("task_id")
-            if task_id:
-                operation_task_id = str(task_id)
-                operation_task_name = str(record.details.get("name", ""))
-                if record.status is JobStatus.DOWNLOADING:
-                    record = store.update_status(
-                        record.id,
-                        record.status,
-                        details={**record.details, "backend_started": False},
-                        expected_status=record.status,
-                    )
-                if resume_download is None:
-                    raise RuntimeError("Acquisition service has no resume method")
-                relocate_download = getattr(service, "relocate_download", None)
-                if callable(relocate_download):
-                    await mutate_backend(
-                        relocate_download,
-                        operation_task_id,
-                        configured_settings.incoming_dir / record.id,
-                    )
-                    current = store.get_job(job_id)
-                    if current.status in {
-                        JobStatus.CANCELLING,
-                        JobStatus.CANCELLED,
-                    }:
-                        cancelled = await settle_operation_cancel(operation_task_id)
-                        return _job_response(cancelled or current)
-                resume_attempted = True
-                await mutate_backend(resume_download, operation_task_id)
-                current = store.get_job(job_id)
-                if current.status in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
-                    cancelled = await settle_operation_cancel(operation_task_id)
-                    return _job_response(cancelled or current)
-                if current.status is JobStatus.DOWNLOADING:
-                    current = store.update_status(
-                        current.id,
-                        current.status,
-                        details={**current.details, "backend_started": True},
-                        expected_status=JobStatus.DOWNLOADING,
-                    )
-                record = current
-            else:
-                checkpoint = store.get_checkpoint(
-                    record.id,
-                    JobStage.ACQUISITION,
-                )
-                restored_release = _release_from_snapshot(
-                    checkpoint.payload.get("release") if checkpoint else None,
-                    expected_release_id=record.release_id,
-                )
-                restore_release = getattr(service, "restore_release", None)
-                if restored_release is not None and callable(restore_release):
-                    restore_release(restored_release)
-                elif callable(restore_release):
-                    search_query = record.spec.get("search_query")
-                    if isinstance(search_query, str) and search_query.strip():
-                        try:
-                            media_kind = MediaKind(
-                                str(record.spec.get("media_type", MediaKind.MOVIE.value))
-                            )
-                        except ValueError:
-                            media_kind = MediaKind.MOVIE
-                        search_results = await service.search(
-                            MediaQuery(
-                                query=search_query,
-                                year=(
-                                    int(record.spec["year"])
-                                    if record.spec.get("year") is not None
-                                    else None
-                                ),
-                                media_kind=media_kind,
-                            )
-                        )
-                        restored_release = next(
-                            (
-                                candidate
-                                for candidate in search_results
-                                if candidate.release_id == record.release_id
-                            ),
-                            None,
-                        )
-                    if restored_release is None:
-                        raise AcquisitionError(
-                            AcquisitionErrorCode.DOWNLOAD_UNAVAILABLE,
-                            "Không thể khôi phục bản phát hành; hãy tìm kiếm và chọn lại",
-                            retryable=True,
-                        )
-                task = await mutate_backend(
-                    service.start_download,
-                    restored_release or record.release_id,
-                    configured_settings.incoming_dir / record.id,
-                    rights_confirmed=True,
-                    paused=True,
-                )
-                operation_task_id = str(_adapter_value(task, "task_id", ""))
-                operation_task_name = str(_adapter_value(task, "name", ""))
-                task_id = operation_task_id
-                if not operation_task_id:
-                    raise RuntimeError("Download adapter returned no task id")
-                current = store.get_job(job_id)
-                if current.status in {JobStatus.CANCELLING, JobStatus.CANCELLED}:
-                    current = store.update_status(
-                        job_id,
-                        current.status,
-                        details={
-                            **current.details,
-                            "task_id": operation_task_id,
-                            "name": operation_task_name,
-                        },
-                    )
-                    if cancelled := await settle_operation_cancel(operation_task_id):
-                        return _job_response(cancelled)
-                record = store.update_status(
-                    record.id,
-                    JobStatus.DOWNLOADING,
-                    stage=JobStage.ACQUISITION,
-                    details={
-                        **record.details,
-                        "task_id": operation_task_id,
-                        "name": operation_task_name,
-                        "downloaded_bytes": 0,
-                        "total_bytes": None,
-                        "speed_bytes_per_second": 0,
-                        "eta_seconds": None,
-                        "backend_started": False,
-                    },
-                )
-                store.save_checkpoint(
-                    record.id,
-                    JobStage.ACQUISITION,
-                    {"task_id": operation_task_id},
-                )
-                current = store.get_job(job_id)
-                if current.status in {
-                    JobStatus.CANCELLING,
-                    JobStatus.CANCELLED,
-                }:
-                    cancelled = await settle_operation_cancel(operation_task_id)
-                    return _job_response(cancelled or current)
-                if resume_download is None:
-                    raise RuntimeError("Acquisition service has no resume method")
-                resume_attempted = True
-                await mutate_backend(resume_download, operation_task_id)
-                current = store.get_job(job_id)
-                if current.status in {
-                    JobStatus.CANCELLING,
-                    JobStatus.CANCELLED,
-                }:
-                    cancelled = await settle_operation_cancel(operation_task_id)
-                    return _job_response(cancelled or current)
-                record = store.update_status(
-                    current.id,
-                    JobStatus.DOWNLOADING,
-                    details={**current.details, "backend_started": True},
-                    expected_status=JobStatus.DOWNLOADING,
-                )
-            return _job_response(record)
         except JobNotFound as exc:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "job_not_found",
-                    "message": "Không tìm thấy job",
-                    "retryable": False,
-                },
-            ) from exc
-        except InvalidTransition as exc:
-            current = store.get_job(job_id)
-            if current.status is JobStatus.CANCELLING:
-                if owns_operation and operation_task_id is not None:
-                    cancelled = await settle_operation_cancel(operation_task_id)
-                    return _job_response(cancelled or current)
-                if owns_operation:
-                    return _job_response(store.finalize_cancel(job_id))
-                return _job_response(current)
-            if current.status is JobStatus.CANCELLED:
-                return _job_response(current)
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "invalid_job_transition",
-                    "message": str(exc),
-                    "retryable": False,
-                },
-            ) from exc
-        except ActiveJobExists as exc:
-            active = store.list_active_jobs(limit=1)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except (InvalidTransition, ActiveJobExists) as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
-                    "code": "active_job_exists",
+                    "code": "resume_conflict",
                     "message": str(exc),
                     "retryable": True,
-                    "active_job_id": active[0].id if active else None,
                 },
             ) from exc
-        except AcquisitionError as exc:
-            current = store.get_job(job_id)
-            if current.status is JobStatus.CANCELLING:
-                if owns_operation and operation_task_id is not None:
-                    cancelled = await settle_operation_cancel(operation_task_id)
-                    return _job_response(cancelled or current)
-                if owns_operation:
-                    return _job_response(store.finalize_cancel(job_id))
-                return _job_response(current)
-            if current.status is JobStatus.CANCELLED:
-                return _job_response(current)
-            failed = await fail_resume_download(
-                exc.code.value,
-                exc.message_vi,
-                retryable=exc.retryable,
+        if record.status in {
+            JobStatus.CREATED,
+            JobStatus.SEARCHING,
+            JobStatus.AWAITING_RELEASE_SELECTION,
+            JobStatus.DOWNLOADING,
+            JobStatus.SUBTITLE_MATCHING,
+        }:
+            record = store.update_status(
+                record.id,
+                JobStatus.FAILED,
+                error_code="legacy_network_source_removed",
+                error_message="Job nguồn mạng cũ không còn được hỗ trợ; hãy tải MP4/MKV lên",
+                retryable=False,
             )
-            raise HTTPException(
-                status_code=_acquisition_error_status(exc),
-                detail={
-                    "code": exc.code.value,
-                    "message": exc.message_vi,
-                    "retryable": exc.retryable,
-                    "job_id": failed.id,
-                },
-            ) from exc
-        except HTTPException:
-            raise
-        except Exception as exc:
-            current = store.get_job(job_id)
-            if current.status is JobStatus.CANCELLING:
-                if owns_operation and operation_task_id is not None:
-                    cancelled = await settle_operation_cancel(operation_task_id)
-                    return _job_response(cancelled or current)
-                if owns_operation:
-                    return _job_response(store.finalize_cancel(job_id))
-                return _job_response(current)
-            if current.status is JobStatus.CANCELLED:
-                return _job_response(current)
-            message = "Không thể tiếp tục tác vụ tải nguồn"
-            failed = await fail_resume_download(
-                "download_resume_failed",
-                message,
-                retryable=True,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": "download_resume_failed",
-                    "message": message,
-                    "retryable": True,
-                    "job_id": failed.id,
-                },
-            ) from exc
+        return _job_response(record)
 
     @application.get("/v1/jobs/{job_id}/events")
     async def job_events(

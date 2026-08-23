@@ -1,17 +1,6 @@
 {
   "schema_version": 1,
   "components": {
-    "prowlarr": {
-      "version": "2.5.2.5491",
-      "url": "https://github.com/Prowlarr/Prowlarr/releases/download/v2.5.2.5491/Prowlarr.master.2.5.2.5491.linux-core-x64.tar.gz",
-      "sha256": "22fe95742869d7af5e16d420c7889185579152ea8324be6c6e4e3cd011f4c37b",
-      "license": "GPL-3.0-only"
-    },
-    "qbittorrent_nox": {
-      "package": "qbittorrent-nox",
-      "version": "4.4.1-2",
-      "source": "Ubuntu 22.04 jammy"
-    },
     "ffmpeg": {
       "package": "ffmpeg",
       "source": "Ubuntu 22.04 jammy"

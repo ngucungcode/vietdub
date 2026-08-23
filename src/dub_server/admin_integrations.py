@@ -1,10 +1,4 @@
-"""Local-only administration helpers for external acquisition integrations.
-
-This module deliberately exposes a very small projection of Prowlarr data and
-never returns provider fields, URLs, response bodies, or authentication data.
-OpenSubtitles credentials are validated before their API key and short-lived
-token are committed to disk.  The account password is never persisted.
-"""
+"""Local-only OpenSubtitles administration with atomic secret writes."""
 
 from __future__ import annotations
 
@@ -14,8 +8,6 @@ import stat
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -38,195 +30,6 @@ class AdminIntegrationError(Exception):
         self.code = code
         self.message = message
         self.retryable = retryable
-
-
-class ProwlarrAdminClient:
-    """Constrained Prowlarr admin adapter with response allowlisting."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        api_key: str,
-        client: httpx.AsyncClient,
-        timeout_seconds: float = 20.0,
-    ) -> None:
-        parsed = urlsplit(base_url)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-        ):
-            raise AdminIntegrationError(
-                status_code=503,
-                code="prowlarr_configuration_invalid",
-                message="Địa chỉ Prowlarr không hợp lệ",
-                retryable=False,
-            )
-        if not api_key:
-            raise AdminIntegrationError(
-                status_code=503,
-                code="prowlarr_not_configured",
-                message="Prowlarr chưa được cấu hình",
-                retryable=False,
-            )
-        self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._client = client
-        self._timeout = httpx.Timeout(timeout_seconds)
-
-    async def list_indexers(self) -> list[dict[str, Any]]:
-        response = await self._request("GET", "/api/v1/indexer")
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise _invalid_prowlarr_response() from exc
-        if not isinstance(payload, list):
-            raise _invalid_prowlarr_response()
-
-        result: list[dict[str, Any]] = []
-        for raw in payload:
-            if not isinstance(raw, dict):
-                continue
-            indexer_id = _integer(raw.get("id"))
-            name = _safe_text(raw.get("name"), max_length=300)
-            if indexer_id is None or indexer_id < 1 or not name:
-                continue
-            status_payload = raw.get("status")
-            status_record = status_payload if isinstance(status_payload, dict) else {}
-            result.append(
-                {
-                    "id": indexer_id,
-                    "name": name,
-                    "definition_name": _optional_text(
-                        raw.get("definitionName"), max_length=300
-                    ),
-                    "implementation_name": _optional_text(
-                        raw.get("implementationName"), max_length=300
-                    ),
-                    "protocol": _optional_text(raw.get("protocol"), max_length=30),
-                    "privacy": _optional_text(raw.get("privacy"), max_length=30),
-                    "enabled": bool(raw.get("enable", False)),
-                    "supports_search": bool(raw.get("supportsSearch", False)),
-                    "supports_rss": bool(raw.get("supportsRss", False)),
-                    "priority": _integer(raw.get("priority")),
-                    "disabled_until": _optional_text(
-                        status_record.get("disabledTill"), max_length=80
-                    ),
-                    "most_recent_failure": _optional_text(
-                        status_record.get("mostRecentFailure"), max_length=80
-                    ),
-                }
-            )
-        result.sort(key=lambda item: (item["name"].casefold(), item["id"]))
-        return result
-
-    async def test_all(self) -> dict[str, Any]:
-        response = await self._request(
-            "POST",
-            "/api/v1/indexer/testall",
-            accepted_statuses={200, 204, 400},
-            timeout_seconds=120.0,
-        )
-        if response.status_code in {200, 204} and not response.content.strip():
-            return {
-                "all_ok": True,
-                "failed_count": 0,
-                "results": [],
-            }
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise _invalid_prowlarr_response() from exc
-        if not isinstance(payload, list):
-            raise _invalid_prowlarr_response()
-
-        results: list[dict[str, Any]] = []
-        for raw in payload:
-            if not isinstance(raw, dict):
-                continue
-            indexer_id = _integer(raw.get("id"))
-            if indexer_id is None or indexer_id < 1:
-                continue
-            failures = raw.get("validationFailures")
-            is_valid = raw.get("isValid")
-            if not isinstance(is_valid, bool):
-                is_valid = isinstance(failures, list) and not failures
-            failure_count = len(failures) if isinstance(failures, list) else 0
-            results.append(
-                {
-                    "indexer_id": indexer_id,
-                    "ok": is_valid,
-                    "failure_count": failure_count,
-                }
-            )
-        results.sort(key=lambda item: item["indexer_id"])
-        failed_count = sum(1 for item in results if not item["ok"])
-        return {
-            "all_ok": response.status_code in {200, 204} and failed_count == 0,
-            "failed_count": failed_count,
-            "results": results,
-        }
-
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        accepted_statuses: set[int] | None = None,
-        timeout_seconds: float | None = None,
-    ) -> httpx.Response:
-        try:
-            response = await self._client.request(
-                method,
-                f"{self._base_url}{path}",
-                headers={"X-Api-Key": self._api_key, "Accept": "application/json"},
-                timeout=(
-                    httpx.Timeout(timeout_seconds)
-                    if timeout_seconds is not None
-                    else self._timeout
-                ),
-            )
-        except httpx.TimeoutException as exc:
-            raise AdminIntegrationError(
-                status_code=503,
-                code="prowlarr_timeout",
-                message="Prowlarr phản hồi quá thời gian cho phép",
-                retryable=True,
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise AdminIntegrationError(
-                status_code=503,
-                code="prowlarr_unavailable",
-                message="Không thể kết nối tới Prowlarr",
-                retryable=True,
-            ) from exc
-
-        if accepted_statuses and response.status_code in accepted_statuses:
-            return response
-        if response.status_code in {401, 403}:
-            raise AdminIntegrationError(
-                status_code=503,
-                code="prowlarr_auth_failed",
-                message="Prowlarr từ chối khóa API đã cấu hình",
-                retryable=False,
-            )
-        if response.status_code == 429 or response.status_code >= 500:
-            raise AdminIntegrationError(
-                status_code=503,
-                code="prowlarr_unavailable",
-                message="Prowlarr đang tạm thời không khả dụng",
-                retryable=True,
-            )
-        if response.status_code >= 400:
-            raise AdminIntegrationError(
-                status_code=502,
-                code="prowlarr_request_rejected",
-                message="Prowlarr từ chối yêu cầu quản trị",
-                retryable=False,
-            )
-        return response
 
 
 class OpenSubtitlesAdminClient:
@@ -705,15 +508,6 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
-
-def _invalid_prowlarr_response() -> AdminIntegrationError:
-    return AdminIntegrationError(
-        status_code=502,
-        code="prowlarr_invalid_response",
-        message="Prowlarr trả về dữ liệu không hợp lệ",
-        retryable=True,
-    )
 
 
 def _invalid_opensubtitles_configuration() -> AdminIntegrationError:

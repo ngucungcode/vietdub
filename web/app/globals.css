@@ -138,13 +138,17 @@ select:focus-visible {
   box-shadow: 0 0 0 4px rgba(255, 174, 94, 0.11);
 }
 
+.mobile-nav {
+  display: none;
+}
+
 .hero {
-  min-height: 360px;
+  min-height: 250px;
   display: grid;
   grid-template-columns: minmax(0, 1.65fr) minmax(310px, 0.7fr);
   align-items: end;
-  gap: 72px;
-  padding: 70px 0 56px;
+  gap: 48px;
+  padding: 38px 0 34px;
 }
 
 .eyebrow,
@@ -165,15 +169,15 @@ footer {
 h1 {
   max-width: 850px;
   margin: 0;
-  font-size: clamp(44px, 5.5vw, 80px);
-  line-height: 0.98;
+  font-size: clamp(40px, 4.4vw, 64px);
+  line-height: 1.02;
   letter-spacing: -0.055em;
   font-weight: 680;
 }
 
 .lead {
   max-width: 730px;
-  margin: 26px 0 0;
+  margin: 18px 0 0;
   color: #aeb4aa;
   font-size: 17px;
   line-height: 1.62;
@@ -181,6 +185,9 @@ h1 {
 
 .machine-card {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: clip;
   overflow: hidden;
   min-height: 194px;
   padding: 24px;
@@ -190,19 +197,12 @@ h1 {
 }
 
 .machine-card::after {
-  content: "";
-  position: absolute;
-  width: 100px;
-  height: 100px;
-  top: -55px;
-  right: -55px;
-  border: 1px solid var(--acid-dark);
-  transform: rotate(45deg);
+  display: none;
 }
 
 .machine-label {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .machine-card strong {
@@ -214,11 +214,31 @@ h1 {
 
 .machine-meta {
   display: flex;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   margin-top: 8px;
   color: var(--muted);
   font-family: Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
+}
+
+.machine-card > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.machine-action {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 0 14px;
+  color: #10150e;
+  background: var(--acid);
+  border-radius: 3px;
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
 }
 
 .gpu-device-list {
@@ -2036,29 +2056,42 @@ footer {
     height: 72px;
   }
 
-  .health-pill {
-    width: 11px;
-    height: 11px;
-    overflow: hidden;
-    padding: 0;
-    border: 0;
-  }
-
-  .health-pill .pulse {
-    flex: 0 0 auto;
-  }
-
   .topnav {
     display: none;
   }
 
+  .health-pill {
+    max-width: 145px;
+    padding: 8px 10px;
+    font-size: 11px;
+  }
+
+  .mobile-nav {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border: 1px solid var(--line);
+    background: rgba(11, 14, 13, 0.97);
+  }
+
+  .mobile-nav a {
+    min-height: 44px;
+    display: grid;
+    place-items: center;
+    color: var(--ink);
+    font-size: 12px;
+    text-decoration: none;
+  }
+
   .hero {
     min-height: auto;
-    padding: 48px 0 38px;
+    padding: 30px 0 26px;
   }
 
   h1 {
-    font-size: clamp(40px, 13vw, 62px);
+    font-size: clamp(36px, 10.5vw, 44px);
   }
 
   .lead {
@@ -2080,7 +2113,7 @@ footer {
 
   .search-form {
     display: grid;
-    grid-template-columns: 1fr 92px;
+    grid-template-columns: 1fr;
   }
 
   .search-button {
@@ -2090,6 +2123,11 @@ footer {
 
   .year-field {
     width: auto;
+  }
+
+  .small-button,
+  .source-tabs button {
+    min-height: 44px;
   }
 
   .settings-grid,

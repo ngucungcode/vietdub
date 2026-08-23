@@ -38,7 +38,7 @@ if [[ "${recovered}" != true ]]; then
   exit 1
 fi
 
-for port in 8080 8081 9696; do
+for port in 8080; do
   addresses="$(ss -H -lnt "sport = :${port}" | awk '{print $4}')"
   if [[ -z "${addresses}" ]] || printf '%s\n' "${addresses}" | grep -Evq '^127\.0\.0\.1:'; then
     echo "Cổng ${port} không chỉ bind loopback" >&2
@@ -47,11 +47,8 @@ for port in 8080 8081 9696; do
 done
 
 curl --silent --show-error --fail http://127.0.0.1:8080/v1/health \
-  | jq -e '.status == "ok" and .gpu.ready == true and .acquisition_configured == true and .database.journal_mode == "wal"' \
+  | jq -e '.status == "ok" and .gpu.ready == true and .database.journal_mode == "wal"' \
   >/dev/null
 
-runuser -u "${DUB_NATIVE_USER}" --preserve-environment -- \
-  "${DUB_VENV_DIR}/bin/python" "${SCRIPT_DIR}/native-qbittorrent-smoke.py" >/dev/null
-
 "${PROJECT_ROOT}/scripts/native-stack.sh" status
-echo "Acceptance native đạt: GPU, API, acquisition, loopback và tự phục hồi"
+echo "Acceptance native đạt: GPU, API, upload-only, loopback và tự phục hồi"

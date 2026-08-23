@@ -35,29 +35,7 @@ type Health = {
   };
 };
 
-type Capabilities = {
-  offline_inference?: boolean;
-  one_active_job_per_gpu?: boolean;
-  outputs?: string[];
-  cinematic_audio?: {
-    dialogue_removed?: boolean;
-    music_and_effects_preserved?: boolean;
-    narration_ducking?: boolean;
-  };
-};
 
-type Release = {
-  release_id: string;
-  title: string;
-  indexer_id?: number;
-  protocol?: string;
-  info_hash?: string | null;
-  size_bytes?: number | null;
-  seeders?: number | null;
-  leechers?: number | null;
-  published_at?: string | null;
-  categories?: string[];
-};
 
 type ModelEntry = {
   id: string;
@@ -160,26 +138,7 @@ type IntegrationComponent = {
 };
 
 type IntegrationsStatus = {
-  prowlarr?: IntegrationComponent;
   opensubtitles?: IntegrationComponent;
-};
-
-type ProwlarrIndexer = {
-  id?: number;
-  indexer_id?: number;
-  name?: string;
-  definition_name?: string | null;
-  implementation_name?: string | null;
-  protocol?: string;
-  privacy?: string | null;
-  enable?: boolean;
-  enabled?: boolean;
-  priority?: number;
-  status?: string;
-  supports_search?: boolean;
-  supports_rss?: boolean;
-  disabled_until?: string | null;
-  most_recent_failure?: string | null;
 };
 
 type UploadSession = {
@@ -765,22 +724,16 @@ function jobProgressView(job: Job): JobProgressView {
 
 export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
-  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
+
   const [catalog, setCatalog] = useState<ModelCatalog>({ schema_version: 1, models: [] });
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [year, setYear] = useState("");
-  const [results, setResults] = useState<Release[]>([]);
-  const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
-  const [releaseId, setReleaseId] = useState("");
-  const [sourceMode, setSourceMode] = useState<"search" | "release" | "upload">("search");
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [uploadSessionId, setUploadSessionId] = useState<string | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState("auto");
-  const [subtitleMode, setSubtitleMode] = useState("prefer");
+
   const [timingProfile, setTimingProfile] = useState<"natural" | "strict">("natural");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>({});
   const [voiceId, setVoiceId] = useState("");
@@ -789,7 +742,6 @@ export default function Home() {
   const [glossaryText, setGlossaryText] = useState("");
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
   const [languageChoice, setLanguageChoice] = useState("en");
-  const [searching, setSearching] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -801,7 +753,6 @@ export default function Home() {
   } | null>(null);
 
   const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
-  const [indexers, setIndexers] = useState<ProwlarrIndexer[]>([]);
   const [integrationBusy, setIntegrationBusy] = useState<string | null>(null);
   const [integrationNotice, setIntegrationNotice] = useState<string | null>(null);
   const [integrationProblem, setIntegrationProblem] = useState<string | null>(null);
@@ -829,33 +780,19 @@ export default function Home() {
   }, []);
 
   const refreshCatalog = useCallback(async () => {
-    const [modelResult, capabilityResult] = await Promise.allSettled([
-      api<ModelCatalog>("/models"),
-      api<Capabilities>("/capabilities"),
-    ]);
-    if (modelResult.status === "fulfilled") setCatalog(modelResult.value);
-    if (capabilityResult.status === "fulfilled") setCapabilities(capabilityResult.value);
+    try {
+      setCatalog(await api<ModelCatalog>("/models"));
+    } catch {
+      setCatalog({ schema_version: 1, models: [] });
+    }
   }, []);
 
   const refreshIntegrations = useCallback(async () => {
     setIntegrationProblem(null);
-    const [statusResult, indexerResult] = await Promise.allSettled([
-      api<IntegrationsStatus>("/admin/integrations", undefined, true),
-      api<ProwlarrIndexer[] | { items?: ProwlarrIndexer[]; indexers?: ProwlarrIndexer[] }>(
-        "/admin/prowlarr/indexers",
-        undefined,
-        true,
-      ),
-    ]);
-    if (statusResult.status === "fulfilled") setIntegrations(statusResult.value);
-    if (indexerResult.status === "fulfilled") {
-      const payload = indexerResult.value;
-      setIndexers(Array.isArray(payload) ? payload : payload.items ?? payload.indexers ?? []);
-    } else {
-      setIndexers([]);
-    }
-    if (statusResult.status === "rejected" && indexerResult.status === "rejected") {
-      setIntegrationProblem(messageOf(statusResult.reason, "Không thể tải trạng thái tích hợp."));
+    try {
+      setIntegrations(await api<IntegrationsStatus>("/admin/integrations", undefined, true));
+    } catch (error) {
+      setIntegrationProblem(messageOf(error, "Không thể tải trạng thái tích hợp."));
     }
   }, []);
 
@@ -883,7 +820,7 @@ export default function Home() {
     () => jobs.find((job) => !nonActiveStatuses.has(job.status)),
     [jobs],
   );
-  const uploadConfigurationLocked = sourceMode === "upload" && Boolean(uploadSessionId);
+  const uploadConfigurationLocked = Boolean(uploadSessionId);
   const selectedJob = useMemo(
     () =>
       jobs.find((job) => job.id === selectedJobId) ??
@@ -1042,44 +979,13 @@ export default function Home() {
     }
   }
 
-  async function handleSearch(event: FormEvent) {
-    event.preventDefault();
-    if (!query.trim()) return;
-    setSearching(true);
-    setProblem(null);
-    setNotice(null);
-    try {
-      const payload = await api<{ results: Release[] }>("/search", {
-        method: "POST",
-        body: JSON.stringify({
-          query: query.trim(),
-          year: year ? Number(year) : null,
-          media_type: "movie",
-        }),
-      });
-      setResults(payload.results);
-      setSelectedRelease(null);
-      if (!payload.results.length) setNotice("Không tìm thấy nguồn phù hợp.");
-    } catch (error) {
-      setProblem(messageOf(error, "Không thể tìm nguồn."));
-    } finally {
-      setSearching(false);
-    }
-  }
-
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    const effectiveReleaseId =
-      sourceMode === "search" ? selectedRelease?.release_id : releaseId.trim();
-    if (sourceMode !== "upload" && !effectiveReleaseId) {
-      setProblem("Hãy chọn một kết quả hoặc nhập Release ID.");
-      return;
-    }
-    if (sourceMode === "upload" && !mediaFile) {
+    if (!mediaFile) {
       setProblem("Hãy chọn một video MP4 hoặc MKV từ thiết bị.");
       return;
     }
-    if (sourceMode === "upload" && subtitleFile && sourceLanguage === "auto") {
+    if (subtitleFile && sourceLanguage === "auto") {
       setProblem("Khi dùng SRT thủ công, hãy chọn ngôn ngữ nguồn cụ thể thay vì Tự động.");
       return;
     }
@@ -1114,8 +1020,6 @@ export default function Home() {
       : null;
     try {
       const glossary = parseGlossary(glossaryText);
-      let job: Job;
-      if (sourceMode === "upload" && mediaFile) {
         const overallTotal = mediaFile.size + (subtitleFile?.size ?? 0);
         const retainedUploadId = uploadSessionIdRef.current;
         createdUploadId = retainedUploadId;
@@ -1241,7 +1145,7 @@ export default function Home() {
           overallTotal,
           speedBytesPerSecond: 0,
         });
-        job = await api<Job>(`/uploads/${encodeURIComponent(session.id)}/finalize`, {
+        const job = await api<Job>(`/uploads/${encodeURIComponent(session.id)}/finalize`, {
           method: "POST",
         });
         uploadFinalizingRef.current = false;
@@ -1250,29 +1154,8 @@ export default function Home() {
         uploadedMediaFileRef.current = null;
         uploadedSubtitleFileRef.current = null;
         setUploadSessionId(null);
-      } else {
-        job = await api<Job>("/jobs", {
-          method: "POST",
-          signal: uploadAbort.signal,
-          body: JSON.stringify({
-            release_id: effectiveReleaseId,
-            rights_confirmed: true,
-            source_language: sourceLanguage,
-            subtitle_mode: subtitleMode,
-            timing_profile: timingProfile,
-            models,
-            voice,
-            voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
-            glossary,
-          }),
-        });
-      }
       setSelectedJobId(job.id);
-      setNotice(
-        sourceMode === "upload"
-          ? `Đã tải tệp và tạo job ${shortId(job.id)}. Tiến trình sẽ tự cập nhật.`
-          : `Đã tạo job ${shortId(job.id)}. Tiến trình sẽ tự cập nhật.`,
-      );
+      setNotice(`Đã tải tệp và tạo job ${shortId(job.id)}. Tiến trình sẽ tự cập nhật.`);
       await refreshOverview();
     } catch (error) {
       const cancelled = uploadCancelledRef.current || error instanceof UploadCancelledError ||
@@ -1309,10 +1192,10 @@ export default function Home() {
           );
         }
       } else {
-        const retained = sourceMode === "upload" && uploadSessionIdRef.current
+        const retained = uploadSessionIdRef.current
           ? ` Phiên ${shortId(uploadSessionIdRef.current)} được giữ lại; bấm Bắt đầu để thử lại mà không gửi lại file đã hoàn tất.`
           : "";
-        setProblem(`${messageOf(error, sourceMode === "upload" ? "Không thể tải tệp và tạo job." : "Không thể tạo job.")}${retained}`);
+        setProblem(`${messageOf(error, "Không thể tải tệp và tạo job.")}${retained}`);
       }
     } finally {
       uploadFinalizingRef.current = false;
@@ -1370,29 +1253,6 @@ export default function Home() {
       setProblem(messageOf(error, "Không thể xác nhận nguồn lời thoại."));
     } finally {
       setBusyAction(null);
-    }
-  }
-
-  async function testProwlarr() {
-    setIntegrationBusy("prowlarr");
-    setIntegrationProblem(null);
-    setIntegrationNotice(null);
-    try {
-      const result = await api<{ all_ok?: boolean; failed_count?: number }>(
-        "/admin/prowlarr/test-all",
-        { method: "POST" },
-        true,
-      );
-      setIntegrationNotice(
-        result.all_ok
-          ? "Toàn bộ indexer Prowlarr đã vượt qua kiểm tra."
-          : `Kiểm tra xong: ${result.failed_count ?? 0} indexer báo lỗi.`,
-      );
-      await refreshIntegrations();
-    } catch (error) {
-      setIntegrationProblem(messageOf(error, "Không thể kiểm tra Prowlarr."));
-    } finally {
-      setIntegrationBusy(null);
     }
   }
 
@@ -1507,7 +1367,6 @@ export default function Home() {
     selectedJob?.result?.warnings,
   );
   const selectedProgress = selectedJob ? jobProgressView(selectedJob) : null;
-  const prowlarrStatus = integrations?.prowlarr;
   const openSubStatus = integrations?.opensubtitles;
 
   return (
@@ -1531,6 +1390,13 @@ export default function Home() {
           {healthLabel}
         </div>
       </header>
+
+      <nav className="mobile-nav" aria-label="Điều hướng nhanh">
+        <a href="#workflow">Tải video</a>
+        <a href="#jobs">Job</a>
+        <a href="#models">Model</a>
+        <a href="#integrations">Phụ đề</a>
+      </nav>
 
       <section className="hero" id="top">
         <div className="hero-copy">
@@ -1573,10 +1439,11 @@ export default function Home() {
                 Mức hỗ trợ: {gpuSupportTier ? gpuSupportTierLabel[gpuSupportTier] : "Không xác định"}
               </span>
             )}
-            <span className={health?.database?.status === "ok" ? "ok" : "warn"}>SQLite {health?.database?.journal_mode ?? "?"}</span>
-            <span className={health?.acquisition_configured ? "ok" : "warn"}>Nguồn {health?.acquisition_configured ? "đã nối" : "chưa nối"}</span>
-            <span className={capabilities?.offline_inference ? "ok" : "warn"}>AI offline</span>
+            <span className="ok">AI đám mây tắt theo thiết kế</span>
           </div>
+          {validModelCount < catalog.models.length && (
+            <a className="machine-action" href="#models">Thiết lập model</a>
+          )}
           {gpuWarnings.length > 0 && (
             <div className="gpu-health-warnings" role="status" aria-label="Cảnh báo GPU">
               <strong>Cảnh báo GPU</strong>
@@ -1587,11 +1454,6 @@ export default function Home() {
               </ul>
             </div>
           )}
-          <div className="signal" aria-hidden="true">
-            {Array.from({ length: 18 }).map((_, index) => (
-              <i key={index} style={{ height: `${18 + ((index * 17) % 34)}%` }} />
-            ))}
-          </div>
         </div>
       </section>
 
@@ -1600,110 +1462,12 @@ export default function Home() {
           <div className="panel-heading">
             <div>
               <span className="step-number">01</span>
-              <h2>Chọn nguồn</h2>
+              <h2>Chọn video</h2>
             </div>
             <span className="legal-note">Chỉ nội dung bạn có quyền sử dụng</span>
           </div>
 
-          <div className="source-tabs" role="tablist" aria-label="Cách chọn nguồn">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceMode === "search"}
-              className={sourceMode === "search" ? "active" : ""}
-              disabled={submitting || uploadConfigurationLocked}
-              onClick={() => setSourceMode("search")}
-            >
-              Tìm qua Prowlarr
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceMode === "release"}
-              className={sourceMode === "release" ? "active" : ""}
-              disabled={submitting || uploadConfigurationLocked}
-              onClick={() => setSourceMode("release")}
-            >
-              Nhập Release ID
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={sourceMode === "upload"}
-              className={sourceMode === "upload" ? "active" : ""}
-              disabled={submitting || uploadConfigurationLocked}
-              onClick={() => setSourceMode("upload")}
-            >
-              Tải tệp lên
-            </button>
-          </div>
-
-          {sourceMode === "search" ? (
-            <>
-              <form className="search-form" onSubmit={handleSearch}>
-                <label className="field grow">
-                  <span>Tên phim</span>
-                  <input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Ví dụ: phim tài liệu của tôi"
-                    maxLength={300}
-                  />
-                </label>
-                <label className="field year-field">
-                  <span>Năm</span>
-                  <input
-                    value={year}
-                    onChange={(event) => setYear(event.target.value.replace(/\D/g, "").slice(0, 4))}
-                    inputMode="numeric"
-                    placeholder="2024"
-                  />
-                </label>
-                <button className="primary search-button" disabled={searching || !query.trim()}>
-                  {searching ? "Đang tìm…" : "Tìm nguồn"}
-                </button>
-              </form>
-
-              {results.length > 0 && (
-                <div className="results" aria-label="Kết quả tìm nguồn">
-                  {results.map((release) => (
-                    <button
-                      type="button"
-                      key={release.release_id}
-                      className={`release-row ${selectedRelease?.release_id === release.release_id ? "selected" : ""}`}
-                      onClick={() => setSelectedRelease(release)}
-                    >
-                      <span className="release-check" aria-hidden="true">
-                        {selectedRelease?.release_id === release.release_id ? "✓" : ""}
-                      </span>
-                      <span className="release-title">
-                        <strong>{release.title}</strong>
-                        <small>
-                          {formatBytes(release.size_bytes)} · {release.seeders ?? 0} seed · {release.protocol ?? "nguồn"}
-                        </small>
-                        <small>
-                          Indexer {release.indexer_id ?? "?"} · {formatDate(release.published_at)}
-                        </small>
-                      </span>
-                      <span className="release-id">{shortId(release.release_id)}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          ) : sourceMode === "release" ? (
-            <label className="field release-input">
-              <span>Release ID từ kết quả tìm kiếm trước đó</span>
-              <input
-                value={releaseId}
-                onChange={(event) => setReleaseId(event.target.value)}
-                placeholder="Dán Release ID"
-                maxLength={500}
-              />
-              <small>Release ID phải tồn tại trong bộ nhớ nguồn của API.</small>
-            </label>
-          ) : (
-            <div className="upload-source" aria-label="Tải video và phụ đề thủ công">
+          <div className="upload-source" aria-label="Tải video và phụ đề thủ công">
               <div className="upload-file-grid">
                 <label className={`file-picker ${mediaFile ? "selected" : ""}`}>
                   <input
@@ -1770,7 +1534,6 @@ export default function Home() {
                 </div>
               )}
             </div>
-          )}
 
           <div className="divider" />
 
@@ -1797,17 +1560,9 @@ export default function Home() {
               </label>
               <label className="field">
                 <span>Nguồn lời thoại</span>
-                {sourceMode === "upload" ? (
-                  <span className="static-field">
-                    {subtitleFile ? "SRT thủ công đã chọn" : "Nhận dạng lời nói bằng ASR"}
-                  </span>
-                ) : (
-                  <select value={subtitleMode} onChange={(event) => setSubtitleMode(event.target.value)}>
-                    <option value="prefer">Ưu tiên phụ đề, fallback ASR</option>
-                    <option value="asr">Luôn nhận dạng bằng ASR</option>
-                    <option value="manual">Chọn phụ đề thủ công</option>
-                  </select>
-                )}
+                <span className="static-field">
+                  {subtitleFile ? "SRT thủ công đã chọn" : "Nhận dạng lời nói bằng ASR"}
+                </span>
               </label>
             </div>
 
@@ -1924,7 +1679,7 @@ export default function Home() {
               </span>
             </label>
 
-            {sourceMode === "upload" && uploadProgress && (
+            {uploadProgress && (
               <section className="upload-progress" aria-live="polite" aria-label="Tiến độ tải tệp">
                 <div className="upload-progress-heading">
                   <span>{uploadPhaseLabels[uploadProgress.phase]}</span>
@@ -1994,19 +1749,19 @@ export default function Home() {
                 Boolean(activeJob) ||
                 !gpuReady ||
                 !rightsConfirmed ||
-                (sourceMode === "upload" && (!mediaFile || Boolean(subtitleFile && sourceLanguage === "auto")))
+                !mediaFile || Boolean(subtitleFile && sourceLanguage === "auto")
               }
             >
               <span>{
                 submitting
-                  ? sourceMode === "upload" && uploadProgress
+                  ? uploadProgress
                     ? uploadPhaseLabels[uploadProgress.phase]
                     : "Đang tạo job…"
                   : activeJob
                     ? "Máy xử lý đang bận"
                     : !gpuReady
                       ? apiConnected ? `${cpuMode ? "CPU" : "GPU"} chưa sẵn sàng` : "Đang kiểm tra máy xử lý"
-                    : sourceMode === "upload" && subtitleFile && sourceLanguage === "auto"
+                    : subtitleFile && sourceLanguage === "auto"
                       ? "Hãy chọn ngôn ngữ của SRT"
                       : "Bắt đầu thuyết minh"
               }</span>
@@ -2436,7 +2191,7 @@ export default function Home() {
         <div className="panel-heading">
           <div>
             <span className="step-number">06</span>
-            <h2>Indexer và phụ đề</h2>
+            <h2>Phụ đề trực tuyến</h2>
           </div>
           <button className="small-button" type="button" onClick={() => void refreshIntegrations()}>Làm mới tích hợp</button>
         </div>
@@ -2451,56 +2206,6 @@ export default function Home() {
         )}
 
         <div className="integration-grid">
-          <article className="integration-card">
-            <div className="integration-heading">
-              <div>
-                <span className="action-kicker">INDEXER MANAGER</span>
-                <h3>Prowlarr</h3>
-              </div>
-              <span className={`status-chip ${prowlarrStatus?.configured ? "online" : "offline"}`}>
-                {prowlarrStatus?.configured ? "Đã cấu hình" : "Chưa cấu hình"}
-              </span>
-            </div>
-            <p>
-              Thêm hoặc sửa indexer trong giao diện Prowlarr. Dashboard chỉ hiển thị cấu hình đã lọc bí mật và gọi kiểm tra toàn bộ.
-            </p>
-            <ol className="setup-steps">
-              <li>Mở Prowlarr qua tunnel localhost.</li>
-              <li>Vào <strong>Indexers → Add Indexer</strong>, chọn nhà cung cấp mà bạn được phép sử dụng.</li>
-              <li>Nhập URL/thông tin của nhà cung cấp, bấm Test rồi Save.</li>
-            </ol>
-            <div className="integration-actions">
-              <a className="small-button download" href="http://127.0.0.1:9696" target="_blank" rel="noreferrer">
-                Mở Prowlarr
-              </a>
-              <button className="small-button" type="button" disabled={integrationBusy === "prowlarr"} onClick={() => void testProwlarr()}>
-                {integrationBusy === "prowlarr" ? "Đang kiểm tra…" : "Test toàn bộ indexer"}
-              </button>
-            </div>
-            <div className="indexer-list">
-              {indexers.map((indexer, index) => {
-                const enabled = indexer.enabled ?? indexer.enable ?? false;
-                const healthy = enabled && !indexer.disabled_until && !indexer.most_recent_failure;
-                return (
-                  <div key={indexer.id ?? indexer.indexer_id ?? `${indexer.name}-${index}`}>
-                    <span className={healthy ? "indexer-dot enabled" : enabled ? "indexer-dot warning" : "indexer-dot"} />
-                    <strong title={indexer.most_recent_failure ?? undefined}>
-                      {indexer.name ?? `Indexer ${indexer.id ?? indexer.indexer_id ?? index + 1}`}
-                    </strong>
-                    <small>
-                      {indexer.protocol ?? "?"} · ưu tiên {indexer.priority ?? "?"}
-                      {indexer.supports_search ? " · search" : ""}
-                    </small>
-                  </div>
-                );
-              })}
-              {!indexers.length && <p>Chưa có indexer hoặc Prowlarr chưa truy cập được.</p>}
-            </div>
-            <p className="tunnel-note">
-              Máy GPU từ xa: mở tunnel <code>ssh -L 8080:127.0.0.1:8080 -L 9696:127.0.0.1:9696 …</code>, rồi truy cập hai cổng qua localhost.
-            </p>
-          </article>
-
           <article className="integration-card">
             <div className="integration-heading">
               <div>

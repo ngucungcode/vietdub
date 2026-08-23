@@ -4,7 +4,9 @@ Tạo bản thuyết minh tiếng Việt hoàn toàn cục bộ trên NVIDIA GPU
 
 ## Pipeline
 
-`MP4/MKV → phụ đề hoặc ASR → dịch tiếng Việt → tách thoại → TTS → timing → ducking/mix → MP4 + SRT + report`
+`Upload MP4/MKV (+ SRT tùy chọn) → ASR/phụ đề → dịch tiếng Việt → tách thoại → TTS → timing → ducking/mix → MP4 + SRT + report`
+
+Nguồn duy nhất là file người dùng upload. VietDub không tích hợp torrent, magnet, indexer hoặc download client.
 
 - ASR: faster-whisper/CTranslate2.
 - Dịch: Gemma 4 GGUF qua llama.cpp.
@@ -56,7 +58,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Compose chỉ publish API qua `127.0.0.1`. Không public trực tiếp Uvicorn, qBittorrent hoặc Prowlarr.
+Compose chỉ publish API qua `127.0.0.1`; worker không có network.
 
 ## Bảo mật
 

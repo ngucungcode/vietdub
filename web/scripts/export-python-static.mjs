@@ -12,6 +12,10 @@ const stagingRoot = `${outputRoot}.staging-${process.pid}`;
 const backupRoot = `${outputRoot}.backup-${process.pid}`;
 const embeddedDeploymentVersion = "embedded-static-v1";
 
+function stabilizeClientAsset(source) {
+  return source.replace(/\/{0,2}_next\/static\/chunks\//g, "assets/");
+}
+
 function stabilizeRenderedHtml(html) {
   const deploymentVersionPattern = /\\\"deploymentVersion\\\":\\\"[^\"\\]+\\\"/g;
   const matches = html.match(deploymentVersionPattern) ?? [];
@@ -40,7 +44,16 @@ async function copyFlatAssets(source, destination, names = new Set()) {
         throw new Error(`Trùng tên asset client khi flatten: ${entry.name}`);
       }
       names.add(entry.name);
-      await cp(sourcePath, path.join(destination, entry.name));
+      const destinationPath = path.join(destination, entry.name);
+      if (entry.name.endsWith(".js")) {
+        await writeFile(
+          destinationPath,
+          stabilizeClientAsset(await readFile(sourcePath, "utf8")),
+          "utf8",
+        );
+      } else {
+        await cp(sourcePath, destinationPath);
+      }
     }
   }
 }

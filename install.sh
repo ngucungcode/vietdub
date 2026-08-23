@@ -86,7 +86,7 @@ installer_stack_healthy() {
   local program
   status_output="$("${PROJECT_ROOT}/scripts/native-stack.sh" status 2>/dev/null)" \
     || return 1
-  for program in api prowlarr qbittorrent worker; do
+  for program in api worker; do
     printf '%s\n' "${status_output}" \
       | grep -Eq "^${program}[[:space:]]+RUNNING[[:space:]]" || return 1
   done
@@ -943,11 +943,6 @@ if [[ "${START_STACK}" == true ]]; then
     fi
   else
     "${PROJECT_ROOT}/scripts/native-stack.sh" start 9>&-
-  fi
-  if [[ -s "${DUB_PROWLARR_API_KEY_FILE}" && -s "${DUB_QBITTORRENT_PASSWORD_FILE}" ]]; then
-    "${PROJECT_ROOT}/scripts/native-init-services.sh"
-  else
-    "${PROJECT_ROOT}/scripts/native-init-services.sh" --rotate-secrets
   fi
 
   stage_started_seconds=${SECONDS}

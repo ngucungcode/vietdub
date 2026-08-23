@@ -660,48 +660,6 @@
       "version": "1.5.0"
     },
     {
-      "bom-ref": "native:prowlarr@2.5.2.5491",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://github.com/Prowlarr/Prowlarr/releases/download/v2.5.2.5491/Prowlarr.master.2.5.2.5491.linux-core-x64.tar.gz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "22fe95742869d7af5e16d420c7889185579152ea8324be6c6e4e3cd011f4c37b"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "name": "GPL-3.0-only"
-          }
-        }
-      ],
-      "name": "prowlarr",
-      "properties": [],
-      "type": "library",
-      "version": "2.5.2.5491"
-    },
-    {
-      "bom-ref": "native:qbittorrent_nox@4.4.1-2",
-      "name": "qbittorrent_nox",
-      "properties": [
-        {
-          "name": "thuyetminh:native:package",
-          "value": "qbittorrent-nox"
-        },
-        {
-          "name": "thuyetminh:native:source",
-          "value": "Ubuntu 22.04 jammy"
-        }
-      ],
-      "type": "library",
-      "version": "4.4.1-2"
-    },
-    {
       "bom-ref": "native:tiger@9f18d4a10a7137e1ce8052cfb62215179f1287b6",
       "externalReferences": [
         {
@@ -25981,8 +25939,6 @@
         "native:ffmpeg@system-managed",
         "native:llama_cpp@b10208",
         "native:piper_tts@1.5.0",
-        "native:prowlarr@2.5.2.5491",
-        "native:qbittorrent_nox@4.4.1-2",
         "native:tiger@9f18d4a10a7137e1ce8052cfb62215179f1287b6",
         "native:vieneu@3.2.3",
         "npm:@alloc/quick-lru@5.2.0",
@@ -26757,14 +26713,6 @@
     {
       "dependsOn": [],
       "ref": "native:piper_tts@1.5.0"
-    },
-    {
-      "dependsOn": [],
-      "ref": "native:prowlarr@2.5.2.5491"
-    },
-    {
-      "dependsOn": [],
-      "ref": "native:qbittorrent_nox@4.4.1-2"
     },
     {
       "dependsOn": [],
@@ -29684,7 +29632,7 @@
       },
       {
         "name": "thuyetminh:native-lock-sha256",
-        "value": "38650b5776bee6cefefcf66c121e88cf6eb70670ad4e83e9ba0e63662b3a3675"
+        "value": "9003866f9977d106b118d6bbcca5423a26118a2220db597b41879532e48fd182"
       },
       {
         "name": "thuyetminh:web-lock-sha256",
@@ -29699,7 +29647,7 @@
         "value": "transitive"
       }
     ],
-    "timestamp": "2026-08-22T15:20:41Z",
+    "timestamp": "2026-08-23T06:20:58Z",
     "tools": {
       "components": [
         {
@@ -29710,7 +29658,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:03572709-fa20-45ed-925d-5f5e90a73a95",
+  "serialNumber": "urn:uuid:5c7cfb48-a8f2-428e-9a47-cd4179a624b4",
   "specVersion": "1.6",
   "version": 1
 }

@@ -1008,8 +1008,8 @@ class StateStore:
         A local upload has no network acquisition stage to resume.  Inserting
         the job, its artifact metadata, and both hand-off checkpoints in one
         transaction prevents a process death from exposing a transient
-        ``CREATED`` job that the regular torrent resume path could mistake for
-        an unfinished download.
+        ``CREATED`` job that an old network-source resume path could mistake
+        for unfinished input.
         """
 
         identifier = job_id or str(uuid.uuid4())

@@ -12,6 +12,7 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase: base,
     title: "Lồng Tiếng GPU Studio",
     description,
+    icons: { icon: "/og.png" },
     openGraph: {
       title: "Lồng Tiếng GPU Studio",
       description,

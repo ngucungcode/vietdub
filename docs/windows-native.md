@@ -4,7 +4,6 @@ Tài liệu này cài VietDub trực tiếp trên Windows 10, không dùng
 WSL2 hoặc Docker. Bản Windows hiện là MVP local-upload: dashboard, API, worker và
 toàn bộ pipeline chạy native trên GPU được hỗ trợ hoặc CPU compatibility mode; người
 dùng tải MP4/MKV và SRT từ trình duyệt.
-Prowlarr và qBittorrent không được installer Windows cài hay quản lý.
 
 ## Yêu cầu
 
@@ -49,7 +48,7 @@ không dùng `Invoke-Expression`:
 $p=Join-Path $env:TEMP "thuyetminh-bootstrap.ps1"; Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/ngucungcode/vietdub/main/windows/bootstrap.ps1" -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p
 ```
 
-Bootstrap tải source vào `%LOCALAPPDATA%\Programs\ThuyetMinhOfflineGPU\source`, yêu
+Bootstrap tải source vào `%LOCALAPPDATA%\Programs\VietDub\source`, yêu
 cầu UAC một lần, tự chọn CPU/GPU và profile, cài model, khởi động API + worker, chờ
 health check và mở `http://127.0.0.1:8080/`. Nếu đã clone repository thì chỉ cần chạy
 `.\windows\bootstrap.ps1` trong thư mục dự án.

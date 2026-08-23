@@ -55,27 +55,12 @@ FastAPI and do not install or execute Node.js dependencies.
 
 The managed-container deployment reuses provider packages Python 3.11.0rc1 and
 PyTorch 2.7.0+cu126 instead of replacing them with the Docker pins above. It uses
-FFmpeg 4.4.2 from Ubuntu 22.04. Docker pins remain available for a separate
-full Ubuntu host; every deployment must produce its own hardware acceptance evidence.
+FFmpeg 4.4.2 from Ubuntu 22.04. These measured native versions are recorded in
+`PHASE1_REPORT.md`; Docker pins remain available for a separate full Ubuntu host.
 
-## Separate Compose services
+## External subtitle API
 
-Prowlarr and qBittorrent run as separate processes and are not linked into the
-application Python package. Their source and license obligations still need to
-accompany a redistributed offline bundle.
-
-| Component | Image tag | License | Source |
-|---|---|---|---|
-| Prowlarr | `2.5.2.5491-ls155@sha256:2f3d31307beba3ba2dd226d191f5f5c14ee3b4d8b49277c64683f5ed97083179` | GPL-3.0 | <https://github.com/Prowlarr/Prowlarr> |
-| qBittorrent | `5.2.3_v2.0.13-ls469@sha256:b024436f8ca665d16d9a997d26fd27fdf867ee5566ba09f32764e7b2976d3e02` | GPL-2.0-or-later | <https://github.com/qbittorrent/qBittorrent> |
-
-Native mode instead installs Prowlarr `2.5.2.5491` from its official Linux x64
-release archive (SHA-256 pinned in `native/components.lock.json`) and qBittorrent
-`4.4.1-2` from Ubuntu 22.04. Both remain separate foreground processes managed by
-Supervisor and are not linked into the Python application.
-
-No indexer or tracker configuration is bundled. OpenSubtitles is accessed
-through its documented REST API and is not used for cloud inference.
+OpenSubtitles is accessed through its documented REST API and is not used for cloud inference.
 
 ## Model assets
 

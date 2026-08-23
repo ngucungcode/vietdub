@@ -10,7 +10,7 @@ SUPERVISORCTL="${DUB_VENV_DIR}/bin/supervisorctl"
 SUPERVISOR_CONFIG="${PROJECT_ROOT}/native/supervisord.conf"
 
 require_runtime() {
-  if [[ ! -x "${SUPERVISORD}" || ! -x "${DUB_PROWLARR_BIN}" ]]; then
+  if [[ ! -x "${SUPERVISORD}" ]]; then
     echo "Chưa bootstrap runtime native; hãy chạy scripts/native-bootstrap.sh" >&2
     exit 2
   fi
@@ -28,7 +28,7 @@ is_running() {
 
 all_programs_running() {
   local status_output="$1"
-  [[ "$(printf '%s\n' "${status_output}" | grep -c ' RUNNING ' || true)" -eq 4 ]] \
+  [[ "$(printf '%s\n' "${status_output}" | grep -c ' RUNNING ' || true)" -eq 2 ]] \
     && ! printf '%s\n' "${status_output}" | grep -Eq ' (BACKOFF|EXITED|FATAL|STOPPED|UNKNOWN) '
 }
 

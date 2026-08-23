@@ -627,7 +627,7 @@ def version() -> None:
     """Hiển thị phiên bản CLI và Python đang dùng."""
 
     try:
-        package_version = metadata.version("thuyet-minh-offline-gpu")
+        package_version = metadata.version("vietdub")
     except metadata.PackageNotFoundError:
         package_version = f"{__version__}+source"
     _print_json(
@@ -1652,7 +1652,7 @@ def cancel(
     job_id: str = typer.Argument(...),
     api_url: str | None = typer.Option(None, envvar="DUB_API_URL"),
 ) -> None:
-    """Hủy job nhưng giữ lại dữ liệu nguồn của torrent client."""
+    """Hủy job và giữ artifact nguồn đã tải lên."""
 
     _print_json(
         _request("POST", f"/v1/jobs/{job_id}/cancel", api_url=api_url)
@@ -1793,29 +1793,6 @@ def stack_preflight() -> None:
         _run_native_admin_script(
             "scripts/native-preflight.sh", "windows/preflight.ps1"
         )
-
-
-@stack_app.command("init-services")
-def stack_init_services(
-    rotate_secrets: bool = typer.Option(False, "--rotate-secrets"),
-    yes: bool = typer.Option(False, "--yes"),
-) -> None:
-    """Khóa WebUI về loopback và tạo/cập nhật secret dịch vụ."""
-
-    if platform.system() == "Windows":
-        typer.echo(
-            "Windows MVP chỉ hỗ trợ upload cục bộ; chưa tự quản lý Prowlarr/qBittorrent",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    if rotate_secrets and not yes:
-        raise typer.BadParameter(
-            "Dùng --yes để xác nhận xoay secret Prowlarr/qBittorrent",
-            param_hint="--yes",
-        )
-    arguments = ["--rotate-secrets"] if rotate_secrets else []
-    _run_project_script("scripts/native-init-services.sh", arguments)
 
 
 @stack_app.command("acceptance")

@@ -91,13 +91,7 @@ class Settings(BaseSettings):
     background_gain_db: float = Field(default=-2.0, ge=-20.0, le=6.0)
     narration_ducking_db: float = Field(default=6.0, ge=0.0, le=18.0)
 
-    prowlarr_url: str = "http://prowlarr:9696"
-    prowlarr_api_key_file: Path | None = Path("/run/secrets/prowlarr_api_key")
-    qbittorrent_url: str = "http://qbittorrent:8080"
-    qbittorrent_username: str = "admin"
-    qbittorrent_password_file: Path | None = Path(
-        "/run/secrets/qbittorrent_password"
-    )
+
     opensubtitles_url: str = "https://api.opensubtitles.com/api/v1"
     opensubtitles_api_key_file: Path | None = Path(
         "/run/secrets/opensubtitles_api_key"
@@ -108,7 +102,7 @@ class Settings(BaseSettings):
     opensubtitles_base_url_file: Path | None = Path(
         "/run/secrets/opensubtitles_base_url"
     )
-    opensubtitles_user_agent: str = f"ThuyetMinhOfflineGPU v{__version__}"
+    opensubtitles_user_agent: str = f"VietDub v{__version__}"
 
     api_url: str = "http://127.0.0.1:8080"
     api_host: str = "127.0.0.1"

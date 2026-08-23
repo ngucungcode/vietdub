@@ -77,7 +77,7 @@ function Initialize-DubWindowsEnvironment {
         if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
             throw "Khong doc duoc LOCALAPPDATA de tao data root Windows"
         }
-        $nativeRoot = Join-Path $env:LOCALAPPDATA "ThuyetMinhOfflineGPU"
+        $nativeRoot = Join-Path $env:LOCALAPPDATA "VietDub"
     }
     if (-not [IO.Path]::IsPathRooted($nativeRoot)) {
         throw "DUB_NATIVE_ROOT phai la duong dan Windows tuyet doi"
@@ -95,8 +95,7 @@ function Initialize-DubWindowsEnvironment {
     Set-DubProcessEnvironmentDefault -Name "DUB_OUTPUT_DIR" -Value (Join-Path $nativeRoot "data\output")
     Set-DubProcessEnvironmentDefault -Name "DUB_GPU_REPORT_PATH" -Value (Join-Path $nativeRoot "state\gpu-health.json")
     Set-DubProcessEnvironmentDefault -Name "DUB_COMPUTE_MODE" -Value "gpu"
-    Set-DubProcessEnvironmentDefault -Name "DUB_PROWLARR_API_KEY_FILE" -Value (Join-Path $nativeRoot "secrets\prowlarr_api_key")
-    Set-DubProcessEnvironmentDefault -Name "DUB_QBITTORRENT_PASSWORD_FILE" -Value (Join-Path $nativeRoot "secrets\qbittorrent_password")
+
     Set-DubProcessEnvironmentDefault -Name "DUB_OPENSUBTITLES_API_KEY_FILE" -Value (Join-Path $nativeRoot "secrets\opensubtitles_api_key")
     Set-DubProcessEnvironmentDefault -Name "DUB_OPENSUBTITLES_TOKEN_FILE" -Value (Join-Path $nativeRoot "secrets\opensubtitles_token")
     Set-DubProcessEnvironmentDefault -Name "DUB_OPENSUBTITLES_BASE_URL_FILE" -Value (Join-Path $nativeRoot "secrets\opensubtitles_base_url")
@@ -107,9 +106,7 @@ function Initialize-DubWindowsEnvironment {
     Set-DubProcessEnvironmentDefault -Name "DUB_API_ACCESS_POLICY" -Value "local"
     Set-DubProcessEnvironmentDefault -Name "DUB_API_PORT" -Value "8080"
     Set-DubProcessEnvironmentDefault -Name "DUB_API_URL" -Value "http://127.0.0.1:8080"
-    Set-DubProcessEnvironmentDefault -Name "DUB_PROWLARR_URL" -Value "http://127.0.0.1:9696"
-    Set-DubProcessEnvironmentDefault -Name "DUB_QBITTORRENT_URL" -Value "http://127.0.0.1:8081"
-    Set-DubProcessEnvironmentDefault -Name "DUB_QBITTORRENT_USERNAME" -Value "dub"
+
     Set-DubProcessEnvironmentDefault -Name "DUB_DEFAULT_ASR_MODEL_ID" -Value "asr-faster-whisper-small"
     Set-DubProcessEnvironmentDefault -Name "DUB_DEFAULT_TRANSLATION_MODEL_ID" -Value "mt-gemma4-e2b-q4"
     Set-DubProcessEnvironmentDefault -Name "DUB_DEFAULT_SEPARATION_MODEL_ID" -Value "separation-tiger-dnr"
@@ -177,7 +174,7 @@ function New-DubWindowsDirectories {
         $env:DUB_INCOMING_DIR,
         $env:DUB_JOBS_DIR,
         $env:DUB_OUTPUT_DIR,
-        (Split-Path -Parent $env:DUB_PROWLARR_API_KEY_FILE),
+        (Split-Path -Parent $env:DUB_OPENSUBTITLES_API_KEY_FILE),
         $Context.RunDirectory,
         $Context.LogDirectory,
         (Join-Path $Context.NativeRoot "cache"),

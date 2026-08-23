@@ -1,7 +1,7 @@
-name: thuyet-minh-offline-gpu
+name: vietdub
 
 x-app-service: &app-service
-  image: thuyet-minh-offline-gpu:phase1
+  image: vietdub:phase1
   build:
     context: .
     dockerfile: Dockerfile
@@ -62,15 +62,11 @@ services:
       DUB_DEFAULT_SEPARATION_MODEL_ID: ${DUB_DEFAULT_SEPARATION_MODEL_ID:-separation-tiger-dnr}
       DUB_DEFAULT_TTS_MODEL_ID: ${DUB_DEFAULT_TTS_MODEL_ID:-tts-piper-vi-vais1000-medium}
       DUB_TTS_SUPPORT_MODEL_ID: ${DUB_TTS_SUPPORT_MODEL_ID:-tts-neucodec-onnx-int8}
-      DUB_PROWLARR_URL: http://prowlarr:9696
-      DUB_PROWLARR_API_KEY_FILE: /run/secrets/prowlarr_api_key
-      DUB_QBITTORRENT_URL: http://qbittorrent:8080
-      DUB_QBITTORRENT_USERNAME: ${DUB_QBITTORRENT_USERNAME:-admin}
-      DUB_QBITTORRENT_PASSWORD_FILE: /run/secrets/qbittorrent_password
+
       DUB_OPENSUBTITLES_API_KEY_FILE: /run/secrets/opensubtitles_api_key
       DUB_OPENSUBTITLES_TOKEN_FILE: /run/secrets/opensubtitles_token
       DUB_OPENSUBTITLES_URL: ${DUB_OPENSUBTITLES_URL:-https://api.opensubtitles.com/api/v1}
-      DUB_OPENSUBTITLES_USER_AGENT: ${DUB_OPENSUBTITLES_USER_AGENT:-ThuyetMinhOfflineGPU v0.3.8}
+      DUB_OPENSUBTITLES_USER_AGENT: ${DUB_OPENSUBTITLES_USER_AGENT:-VietDub v0.3.8}
     ports:
       - "127.0.0.1:${DUB_API_PORT:-8080}:8080"
     volumes:
@@ -82,12 +78,9 @@ services:
       - job_state:/state
       - ./config/models.lock.json:/app/config/models.lock.json:ro
     secrets:
-      - prowlarr_api_key
-      - qbittorrent_password
       - opensubtitles_api_key
       - opensubtitles_token
     networks:
-      - control
       - api_egress
     depends_on:
       volume-init:
@@ -169,47 +162,6 @@ services:
       volume-init:
         condition: service_completed_successfully
 
-  prowlarr:
-    image: lscr.io/linuxserver/prowlarr:2.5.2.5491-ls155@sha256:2f3d31307beba3ba2dd226d191f5f5c14ee3b4d8b49277c64683f5ed97083179
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      PUID: ${PUID:-10001}
-      PGID: ${PGID:-10001}
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
-    ports:
-      - "127.0.0.1:${PROWLARR_PORT:-9696}:9696"
-    volumes:
-      - prowlarr_config:/config
-    networks:
-      - control
-      - prowlarr_egress
-
-  qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3_v2.0.13-ls469@sha256:b024436f8ca665d16d9a997d26fd27fdf867ee5566ba09f32764e7b2976d3e02
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      PUID: ${PUID:-10001}
-      PGID: ${PGID:-10001}
-      TZ: ${TZ:-Asia/Ho_Chi_Minh}
-      WEBUI_PORT: 8080
-      TORRENTING_PORT: ${TORRENTING_PORT:-6881}
-    ports:
-      - "127.0.0.1:${QBITTORRENT_WEBUI_PORT:-8081}:8080"
-      - "${TORRENTING_PORT:-6881}:${TORRENTING_PORT:-6881}/tcp"
-      - "${TORRENTING_PORT:-6881}:${TORRENTING_PORT:-6881}/udp"
-    volumes:
-      - qbittorrent_config:/config
-      - incoming_data:/data/incoming
-    networks:
-      - control
-      - torrent_egress
-    depends_on:
-      volume-init:
-        condition: service_completed_successfully
 
 volumes:
   app_config:
@@ -218,22 +170,15 @@ volumes:
   jobs_data:
   output_data:
   models:
-  prowlarr_config:
-  qbittorrent_config:
+
 
 networks:
-  control:
-    internal: true
   api_egress:
   model_egress:
-  prowlarr_egress:
-  torrent_egress:
+
 
 secrets:
-  prowlarr_api_key:
-    file: ${PROWLARR_API_KEY_FILE:-./secrets/prowlarr_api_key.txt}
-  qbittorrent_password:
-    file: ${QBITTORRENT_PASSWORD_FILE:-./secrets/qbittorrent_password.txt}
+
   opensubtitles_api_key:
     file: ${OPENSUBTITLES_API_KEY_FILE:-./secrets/opensubtitles_api_key.txt}
   opensubtitles_token:

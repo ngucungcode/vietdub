@@ -51,7 +51,6 @@ PY
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-QBIT_VERSION="$(jq -r '.components.qbittorrent_nox.version' "${PROJECT_ROOT}/native/components.lock.json")"
 apt-get install -y \
   build-essential \
   ca-certificates \
@@ -62,7 +61,6 @@ apt-get install -y \
   iproute2 \
   jq \
   ninja-build \
-  "qbittorrent-nox=${QBIT_VERSION}" \
   sqlite3
 
 bash "${SCRIPT_DIR}/install-llama-cpp.sh"
@@ -141,37 +139,9 @@ install -d -m 0750 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \
   "${DUB_JOBS_DIR}" \
   "${DUB_OUTPUT_DIR}" \
   "${DUB_NATIVE_ROOT}/secrets" \
-  "${DUB_PROWLARR_DATA_DIR}" \
-  "${DUB_QBITTORRENT_PROFILE}" \
   "${DUB_RUNTIME_RUN_DIR}" \
   "${DUB_RUNTIME_LOG_DIR}"
 install -d -m 0755 -o root -g root "${DUB_NATIVE_ROOT}/opt"
-
-QBIT_CONFIG_DIR="${DUB_QBITTORRENT_PROFILE}/qBittorrent/config"
-QBIT_CONFIG_PATH="${QBIT_CONFIG_DIR}/qBittorrent.conf"
-install -d -m 0750 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" "${QBIT_CONFIG_DIR}"
-if [[ ! -e "${QBIT_CONFIG_PATH}" ]]; then
-  install -m 0640 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" /dev/null "${QBIT_CONFIG_PATH}"
-  printf '[Preferences]\nDownloads\\SavePath=%s/\nWebUI\\Address=127.0.0.1\nWebUI\\Port=8081\n' \
-    "${DUB_INCOMING_DIR}" >"${QBIT_CONFIG_PATH}"
-fi
-
-PROWLARR_VERSION="$(jq -r '.components.prowlarr.version' "${PROJECT_ROOT}/native/components.lock.json")"
-PROWLARR_URL="$(jq -r '.components.prowlarr.url' "${PROJECT_ROOT}/native/components.lock.json")"
-PROWLARR_SHA256="$(jq -r '.components.prowlarr.sha256' "${PROJECT_ROOT}/native/components.lock.json")"
-PROWLARR_TARGET="${DUB_NATIVE_ROOT}/opt/prowlarr-${PROWLARR_VERSION}"
-if [[ ! -x "${PROWLARR_TARGET}/Prowlarr" ]]; then
-  TEMP_DIR="$(mktemp -d)"
-  trap 'rm -rf -- "${TEMP_DIR}"' EXIT
-  curl --fail --location --retry 3 --output "${TEMP_DIR}/prowlarr.tar.gz" "${PROWLARR_URL}"
-  printf '%s  %s\n' "${PROWLARR_SHA256}" "${TEMP_DIR}/prowlarr.tar.gz" | sha256sum --check --status
-  tar -xzf "${TEMP_DIR}/prowlarr.tar.gz" -C "${TEMP_DIR}"
-  install -d -m 0755 -o root -g root "${PROWLARR_TARGET}"
-  cp -a "${TEMP_DIR}/Prowlarr/." "${PROWLARR_TARGET}/"
-  chown -R root:root "${PROWLARR_TARGET}"
-  chmod -R a-w "${PROWLARR_TARGET}"
-fi
-ln -sfn "${PROWLARR_TARGET}" "${DUB_NATIVE_ROOT}/opt/prowlarr"
 
 if [[ ! -x "${DUB_VENV_DIR}/bin/python" ]]; then
   "${PYTHON_BIN}" -m venv --system-site-packages "${DUB_VENV_DIR}"
@@ -206,8 +176,6 @@ chown -R "${DUB_NATIVE_USER}:${DUB_NATIVE_USER}" \
   "${DUB_MODELS_DIR}" \
   "${DUB_NATIVE_ROOT}/data" \
   "${DUB_NATIVE_ROOT}/secrets" \
-  "${DUB_PROWLARR_DATA_DIR}" \
-  "${DUB_QBITTORRENT_PROFILE}" \
   "${DUB_RUNTIME_RUN_DIR}" \
   "${DUB_RUNTIME_LOG_DIR}"
 

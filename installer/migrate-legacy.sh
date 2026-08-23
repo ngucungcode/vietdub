@@ -141,7 +141,6 @@ if tree_role == "staged":
         "scripts/dub-wrapper.sh",
         "scripts/generate-sbom.py",
         "scripts/native-acceptance.sh",
-        "scripts/native-init-services.sh",
         "scripts/native-model.sh",
         "scripts/native-phase2-acceptance.py",
         "scripts/native-phase2-acceptance.sh",
@@ -149,7 +148,6 @@ if tree_role == "staged":
         "scripts/native-phase3-acceptance.sh",
         "scripts/native-phase4-acceptance.sh",
         "scripts/native-preflight.sh",
-        "scripts/native-qbittorrent-smoke.py",
         "scripts/phase4_acceptance.py",
     )
 for relative in required_files:
@@ -159,7 +157,7 @@ for relative in required_files:
 
 with (root / "pyproject.toml").open("rb") as handle:
     project = tomllib.load(handle).get("project", {})
-if project.get("name") != "thuyet-minh-offline-gpu":
+if project.get("name") != "vietdub":
     raise SystemExit("project.name không khớp")
 if project.get("scripts", {}).get("dub") != "dub_server.cli:app":
     raise SystemExit("entrypoint dub không khớp")
@@ -184,7 +182,7 @@ with (root / "native/components.lock.json").open(encoding="utf-8") as handle:
     components_document = json.load(handle)
 components = components_document.get("components", {})
 if components_document.get("schema_version") != 1 or not {
-    "llama_cpp", "prowlarr", "qbittorrent_nox"
+    "llama_cpp", "tiger", "vieneu"
 } <= set(components):
     raise SystemExit("components.lock.json không phải catalog của dự án")
 
@@ -194,7 +192,6 @@ if tree_role == "staged":
         "installer/prepare-data-root.sh",
         "scripts/dub-wrapper.sh",
         "scripts/native-acceptance.sh",
-        "scripts/native-init-services.sh",
         "scripts/native-model.sh",
         "scripts/native-phase2-acceptance.sh",
         "scripts/native-phase3-acceptance.sh",
@@ -614,7 +611,7 @@ migration_stack_status_text_healthy() {
   local status_output="$1"
   local program
 
-  for program in api prowlarr qbittorrent worker; do
+  for program in api worker; do
     printf '%s\n' "${status_output}" \
       | grep -Eq "^${program}[[:space:]]+RUNNING[[:space:]]" || return 1
   done

@@ -58,20 +58,6 @@ PyTorch 2.7.0+cu126 instead of replacing them with the Docker pins above. It use
 FFmpeg 4.4.2 from Ubuntu 22.04. Docker pins remain available for a separate
 full Ubuntu host; every deployment must produce its own hardware acceptance evidence.
 
-## Optional visual lip-sync backends
-
-VietDub invokes these as separate, operator-provisioned local processes. Their code and
-model artifacts are not vendored in this repository and are disabled by default.
-
-| Component | Pinned source/model | License declared upstream | Source |
-|---|---|---|---|
-| MuseTalk 1.5 | source `0a89dec45a0192b824e3cf4daf96c239440c5ed8`; model `3ef28bc5cff08c90ad8178a25f1b570cd800170f` | code MIT; model CreativeML Open RAIL-M | <https://github.com/TMElyralab/MuseTalk> |
-| LatentSync 1.6 | source `a229c3948406bc2cf6eaf4873e662e70c6a04746`; model `c42c7e6c8e9c213626389fa7d9a3c444b8536353` | code Apache-2.0; model OpenRAIL++ | <https://github.com/bytedance/LatentSync> |
-
-Each backend brings additional model licenses. Operators must preserve notices, verify
-checkpoint terms, and avoid upstream test media in commercial outputs. See
-`docs/LIP_SYNC.md` for the complete pinned layout and acceptance limits.
-
 ## Separate Compose services
 
 Prowlarr and qBittorrent run as separate processes and are not linked into the

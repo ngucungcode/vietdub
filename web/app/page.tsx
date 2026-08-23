@@ -119,7 +119,6 @@ type Job = {
     source_language?: string;
     subtitle_mode?: string;
     timing_profile?: "natural" | "strict";
-    lip_sync_mode?: "off" | "draft" | "final";
     glossary?: Record<string, string>;
     models?: Record<string, string | null>;
     voice?: { voice_id?: string | null; reference_path?: string | null } | null;
@@ -225,7 +224,6 @@ const stageOrder = [
   "timing",
   "mix",
   "export",
-  "lip_sync",
   "verify",
   "done",
 ];
@@ -240,7 +238,6 @@ const stageLabels: Record<string, string> = {
   timing: "Khớp nhịp",
   mix: "Phối âm",
   export: "Dựng MP4",
-  lip_sync: "Khớp khẩu hình",
   verify: "Kiểm tra",
   done: "Hoàn tất",
   mt: "Dịch lời",
@@ -308,9 +305,8 @@ const stageProgressRanges: Record<string, readonly [number, number]> = {
   tts: [735, 850],
   timing: [850, 900],
   mix: [900, 910],
-  export: [910, 980],
-  lip_sync: [980, 995],
-  verify: [995, 1000],
+  export: [910, 985],
+  verify: [985, 1000],
   done: [1000, 1000],
 };
 
@@ -786,7 +782,6 @@ export default function Home() {
   const [sourceLanguage, setSourceLanguage] = useState("auto");
   const [subtitleMode, setSubtitleMode] = useState("prefer");
   const [timingProfile, setTimingProfile] = useState<"natural" | "strict">("natural");
-  const [lipSyncMode, setLipSyncMode] = useState<"off" | "draft" | "final">("off");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>({});
   const [voiceId, setVoiceId] = useState("");
   const [voiceReferencePath, setVoiceReferencePath] = useState("");
@@ -1138,7 +1133,6 @@ export default function Home() {
             rights_confirmed: true,
             source_language: sourceLanguage,
             timing_profile: timingProfile,
-            lip_sync_mode: lipSyncMode,
             models,
             voice,
             voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
@@ -1148,7 +1142,6 @@ export default function Home() {
           rights_confirmed: uploadRequest.rights_confirmed,
           source_language: uploadRequest.source_language,
           timing_profile: uploadRequest.timing_profile,
-          lip_sync_mode: uploadRequest.lip_sync_mode,
           models: uploadRequest.models,
           voice: uploadRequest.voice,
           voice_rights_confirmed: uploadRequest.voice_rights_confirmed,
@@ -1267,7 +1260,6 @@ export default function Home() {
             source_language: sourceLanguage,
             subtitle_mode: subtitleMode,
             timing_profile: timingProfile,
-            lip_sync_mode: lipSyncMode,
             models,
             voice,
             voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
@@ -1847,41 +1839,6 @@ export default function Home() {
                   <strong>Khớp chặt</strong>
                   <small>Bám sát từng mốc phụ đề; tốc độ giữa các câu có thể thay đổi rõ hơn.</small>
                 </span>
-              </label>
-            </fieldset>
-
-            <fieldset className="timing-profile" disabled={submitting || uploadConfigurationLocked}>
-              <legend>Khớp khẩu hình</legend>
-              <label className={lipSyncMode === "off" ? "selected" : ""}>
-                <input
-                  type="radio"
-                  name="lip-sync-mode"
-                  value="off"
-                  checked={lipSyncMode === "off"}
-                  onChange={() => setLipSyncMode("off")}
-                />
-                <span><strong>Tắt</strong><small>Giữ nguyên hình, chỉ căn lời theo timeline.</small></span>
-                <em>Mặc định</em>
-              </label>
-              <label className={lipSyncMode === "draft" ? "selected" : ""}>
-                <input
-                  type="radio"
-                  name="lip-sync-mode"
-                  value="draft"
-                  checked={lipSyncMode === "draft"}
-                  onChange={() => setLipSyncMode("draft")}
-                />
-                <span><strong>Draft · MuseTalk 1.5</strong><small>Nhanh hơn, cần tối thiểu 4 GiB VRAM.</small></span>
-              </label>
-              <label className={lipSyncMode === "final" ? "selected" : ""}>
-                <input
-                  type="radio"
-                  name="lip-sync-mode"
-                  value="final"
-                  checked={lipSyncMode === "final"}
-                  onChange={() => setLipSyncMode("final")}
-                />
-                <span><strong>Final · LatentSync 1.6</strong><small>512 px, cần tối thiểu 18 GiB VRAM và render lâu.</small></span>
               </label>
             </fieldset>
 

@@ -83,21 +83,6 @@ class Settings(BaseSettings):
     timing_rewrite_max_attempts: int = Field(default=3, ge=0, le=3)
     tiger_source_dir: Path = Path("/opt/tiger")
     vieneu_entrypoint: Path = Path("/opt/vieneu/vieneu-offline.py")
-    latentsync_python: Path = Path("/opt/lip-sync/latentsync-venv/bin/python")
-    latentsync_source_dir: Path = Path("/opt/lip-sync/LatentSync")
-    latentsync_checkpoint_path: Path = Path(
-        "/models/lip-sync/latentsync-1.6/latentsync_unet.pt"
-    )
-    latentsync_config_path: Path = Path(
-        "/opt/lip-sync/LatentSync/configs/unet/stage2_512.yaml"
-    )
-    musetalk_python: Path = Path("/opt/lip-sync/musetalk-venv/bin/python")
-    musetalk_source_dir: Path = Path("/opt/lip-sync/MuseTalk")
-    lip_sync_timeout_seconds: float = Field(
-        default=6 * 60 * 60,
-        ge=60.0,
-        le=24 * 60 * 60,
-    )
     separation_chunk_seconds: float = Field(default=120.0, ge=12.0, le=600.0)
     separation_context_seconds: float = Field(default=4.0, ge=0.0, le=12.0)
     separation_batch_size: int = Field(default=1, ge=1, le=16)

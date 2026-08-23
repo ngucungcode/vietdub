@@ -360,47 +360,6 @@ async def process_next_translation_job(
     return True
 
 
-def _ensure_lip_sync_fits_vram(
-    store: StateStore,
-    record: JobRecord,
-    *,
-    settings: Settings | None,
-    report: GpuPreflightReport | None,
-) -> bool:
-    mode = str(record.spec.get("lip_sync_mode", "off"))
-    minimum_mib = {"draft": 4 * 1024, "final": 18 * 1024}.get(mode)
-    if (
-        minimum_mib is None
-        or settings is None
-        or settings.compute_mode != "gpu"
-        or report is None
-        or not report.gpus
-    ):
-        return True
-    available_mib = report.gpus[0].memory_total_mib
-    if available_mib >= minimum_mib:
-        return True
-    store.update_status(
-        record.id,
-        JobStatus.FAILED,
-        expected_status=record.status,
-        stage=record.stage,
-        details={
-            **record.details,
-            "lip_sync_mode": mode,
-            "lip_sync_required_vram_mib": minimum_mib,
-            "lip_sync_available_vram_mib": available_mib,
-        },
-        error_code="lip_sync_vram_insufficient",
-        error_message=(
-            f"Chế độ khẩu hình {mode} cần ít nhất {minimum_mib} MiB VRAM; "
-            f"GPU hiện có {available_mib} MiB"
-        ),
-        retryable=True,
-    )
-    return False
-
-
 async def process_next_phase4_job(
     store: StateStore,
     stage: Phase4Stage,
@@ -415,13 +374,6 @@ async def process_next_phase4_job(
     if not records or shutdown.is_set():
         return False
     record = records[0]
-    if not _ensure_lip_sync_fits_vram(
-        store,
-        record,
-        settings=settings,
-        report=gpu_report,
-    ):
-        return True
     phase4_model_stages: tuple[str, ...]
     timing_rewrite_stages = (
         ("mt",)

@@ -4,7 +4,7 @@ Tạo bản thuyết minh tiếng Việt hoàn toàn cục bộ trên NVIDIA GPU
 
 ## Pipeline
 
-`MP4/MKV → phụ đề hoặc ASR → dịch → tách thoại → TTS → timing → mix → lip-sync tùy chọn → MP4 + SRT + report`
+`MP4/MKV → phụ đề hoặc ASR → dịch tiếng Việt → tách thoại → TTS → timing → ducking/mix → MP4 + SRT + report`
 
 - ASR: faster-whisper/CTranslate2.
 - Dịch: Gemma 4 GGUF qua llama.cpp.
@@ -13,7 +13,6 @@ Tạo bản thuyết minh tiếng Việt hoàn toàn cục bộ trên NVIDIA GPU
 - Output: H.264/AAC, SRT tiếng Việt, timing report JSON.
 - Checkpoint SQLite WAL, cancel/resume, artifact SHA-256.
 - Glossary và context liên block giữ tên riêng/thuật ngữ nhất quán.
-- Khớp khẩu hình tùy chọn: MuseTalk 1.5 `draft` hoặc LatentSync 1.6 `final`; mặc định `off`.
 
 ## Yêu cầu
 
@@ -70,16 +69,6 @@ Compose chỉ publish API qua `127.0.0.1`. Không public trực tiếp Uvicorn, 
 
 Remote deployment phải dùng TLS reverse proxy. Xem `docs/dependency-security.md` và `docs/QUALITY.md`.
 
-## Khớp khẩu hình
-
-- `off`: giữ nguyên frame, nhanh nhất.
-- `draft`: MuseTalk 1.5, tối thiểu 4 GiB VRAM.
-- `final`: LatentSync 1.6 512 px, tối thiểu 18 GiB VRAM.
-
-Backend được cài riêng, pin revision và chạy offline. VietDub khóa SHA-256 checkpoint LatentSync,
-ép Hugging Face/Transformers/Diffusers offline, rồi remux lại đúng audio thuyết minh đã verify.
-Xem layout, license và acceptance tại [`docs/LIP_SYNC.md`](docs/LIP_SYNC.md).
-
 ## Chất lượng và GPU acceptance
 
 ```bash
@@ -99,7 +88,7 @@ dub health
 dub models list
 dub models install-profile auto --yes
 dub jobs list
-dub upload movie.mkv --i-have-rights --lip-sync final --wait
+dub upload movie.mkv --i-have-rights --watch
 ```
 
 ## Cấu hình chính

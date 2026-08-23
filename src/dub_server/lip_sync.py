@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -153,13 +152,11 @@ class ExternalLipSyncProcessor:
         runner: CommandRunner = _run_command,
         timeout_seconds: float = 6 * 60 * 60,
         latentsync_checkpoint_sha256: str = LATENTSYNC_16_CHECKPOINT_SHA256,
-        face_preflight: bool = False,
     ) -> None:
         self._paths = paths
         self._runner = runner
         self._timeout_seconds = timeout_seconds
         self._latentsync_checkpoint_sha256 = latentsync_checkpoint_sha256
-        self._face_preflight_enabled = face_preflight
 
     async def render(
         self,
@@ -185,27 +182,6 @@ class ExternalLipSyncProcessor:
         work.mkdir(parents=True, exist_ok=True)
         generated = work / "generated.mp4"
         generated.unlink(missing_ok=True)
-        preflight_decision = await self._face_preflight(
-            mode=mode,
-            source=source,
-            narration=narration,
-            work=work,
-            cancellation=cancellation,
-        )
-        if preflight_decision != "safe":
-            fallback = {
-                "no_face": "no_face_detected",
-                "ambiguous_faces": "ambiguous_faces",
-                "face_too_small": "face_too_small",
-                "no_speech": "no_active_speech",
-            }.get(preflight_decision, "face_preflight_unavailable")
-            return LipSyncResult(
-                path=source,
-                mode=mode,
-                backend=None,
-                applied=False,
-                fallback_reason=fallback,
-            )
         try:
             backend = await self._render_visuals(
                 mode,
@@ -276,106 +252,6 @@ class ExternalLipSyncProcessor:
             mode=mode,
             backend=backend,
             applied=True,
-        )
-
-    async def _face_preflight(
-        self,
-        *,
-        mode: LipSyncMode,
-        source: Path,
-        narration: Path,
-        work: Path,
-        cancellation: Cancellation | None,
-    ) -> str:
-        if not self._face_preflight_enabled:
-            return "safe"
-        cache_path = work / "face-preflight.json"
-        identity = {
-            "schema_version": 1,
-            "preflight_version": "haar-active-speech-v1",
-            "video_sha256": await asyncio.to_thread(self._sha256, source),
-            "narration_sha256": await asyncio.to_thread(self._sha256, narration),
-            "sample_count_requested": 16,
-            "minimum_face_ratio": 0.015,
-        }
-        cached = self._read_preflight_cache(cache_path, identity)
-        if cached is not None:
-            return cached
-        python = (
-            self._paths.latentsync_python
-            if mode is LipSyncMode.FINAL
-            else self._paths.musetalk_python
-        )
-        command = (
-            os.fspath(python),
-            os.fspath(Path(__file__).with_name("lip_sync_preflight.py")),
-            "--video",
-            os.fspath(source),
-            "--audio",
-            os.fspath(narration),
-            "--sample-count",
-            "16",
-            "--minimum-face-ratio",
-            "0.015",
-        )
-        result = await self._runner(
-            command,
-            cwd=work,
-            cancellation=cancellation,
-            timeout_seconds=min(self._timeout_seconds, 300.0),
-        )
-        decision = "preflight_unavailable"
-        report: dict[str, object] = {}
-        if result.returncode == 0:
-            try:
-                raw = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                raw = None
-            if isinstance(raw, dict) and raw.get("schema_version") == 1:
-                value = raw.get("decision")
-                if value in {
-                    "safe",
-                    "no_face",
-                    "ambiguous_faces",
-                    "face_too_small",
-                    "no_speech",
-                }:
-                    decision = str(value)
-                    report = raw
-        payload = {**identity, **report, "decision": decision}
-        temporary = cache_path.with_suffix(".part.json")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-            newline="\n",
-        )
-        os.replace(temporary, cache_path)
-        return decision
-
-    @staticmethod
-    def _read_preflight_cache(
-        path: Path,
-        identity: dict[str, object],
-    ) -> str | None:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict) or any(
-            payload.get(key) != value for key, value in identity.items()
-        ):
-            return None
-        decision = payload.get("decision")
-        return (
-            str(decision)
-            if decision in {
-                "safe",
-                "no_face",
-                "ambiguous_faces",
-                "face_too_small",
-                "no_speech",
-            }
-            else None
         )
 
     async def _render_visuals(

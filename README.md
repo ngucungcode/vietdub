@@ -78,8 +78,6 @@ Remote deployment phải dùng TLS reverse proxy. Xem `docs/dependency-security.
 
 Backend được cài riêng, pin revision và chạy offline. VietDub khóa SHA-256 checkpoint LatentSync,
 ép Hugging Face/Transformers/Diffusers offline, rồi remux lại đúng audio thuyết minh đã verify.
-Face-safety gate chỉ chạy model khi mọi mẫu có lời đều thấy đúng một mặt đủ lớn. Người nói
-ngoài khung hình, mặt quá nhỏ hoặc nhiều mặt mơ hồ sẽ giữ nguyên hình và vẫn phát audio Việt.
 Xem layout, license và acceptance tại [`docs/LIP_SYNC.md`](docs/LIP_SYNC.md).
 
 ## Chất lượng và GPU acceptance

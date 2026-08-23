@@ -44,19 +44,6 @@ Không dùng test data của upstream cho sản phẩm thương mại.
 
 Có thể đổi toàn bộ đường dẫn bằng biến `DUB_LATENTSYNC_*`, `DUB_MUSETALK_*`.
 
-## Face-safety preflight
-
-Trước khi load model nặng, VietDub lấy tối đa 16 mẫu chỉ tại các cửa sổ WAV có lời nói và chạy OpenCV trong môi trường backend:
-
-- Không có mặt tại bất kỳ mẫu đang nói: giữ nguyên toàn bộ frame/video, audio Việt vẫn phát.
-- Có hơn một mặt tại mẫu đang nói: coi là mơ hồ, không sửa mặt nào.
-- Mặt duy nhất nhỏ hơn 1,5% diện tích frame: không sửa để tránh artifact.
-- Chỉ khi mọi mẫu đang nói có đúng một mặt đủ lớn mới chạy MuseTalk/LatentSync.
-- OpenCV và Haar frontal-face cascade phải có trong từng môi trường backend; thiếu detector thì fail-safe giữ nguyên hình.
-- Kết quả cache tại `jobs/<id>/lip-sync/face-preflight.json`, khóa bằng SHA-256 video + audio + phiên bản gate.
-
-Gate hiện bảo thủ ở cấp job, không đoán active speaker. Vì vậy phim có cảnh người nói ngoài khung hình sẽ giữ nguyên hình cho cả Phase 5 thay vì sửa nhầm diễn viên khác. Audio thuyết minh, SRT và timing không đổi. Shot-level active-speaker routing là bước nâng cấp riêng sau khi có corpus nhiều nhân vật và GPU nghiệm thu thật.
-
 ## Ràng buộc vận hành
 
 - Backend chạy bằng argv, không qua shell.

@@ -7,7 +7,7 @@ name = "vietdub"
 version = "0.3.8"
 description = "Local NVIDIA GPU pipeline for legally acquired Vietnamese video dubbing"
 readme = "README.md"
-requires-python = ">=3.11.0rc1,<3.13"
+requires-python = ">=3.11,<3.14"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
@@ -54,6 +54,7 @@ managed-gpu = [
 native = [
   "supervisor==4.3.0",
 ]
+
 lint = [
   "mypy==1.19.1",
   "ruff==0.14.4",
@@ -76,6 +77,7 @@ dub_server = [
   "web_static/assets/*.js",
   "web_static/assets/_vinext_fonts/*/*.woff2",
 ]
+
 
 [tool.mypy]
 python_version = "3.11"
@@ -108,4 +110,3 @@ ignore = [
   "UP022",   # capture_output= is not equivalent where stderr must stay separate
   "ASYNC109", # timeout parameters are part of this codebase's stage API contract
 ]
-

@@ -55,8 +55,10 @@ function Update-DubProcessPath {
         (Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin"),
         (Join-Path $env:ProgramFiles "Git\cmd"),
         (Join-Path $env:ProgramFiles "CMake\bin"),
+        (Join-Path $env:ProgramFiles "Python313"),
         (Join-Path $env:ProgramFiles "Python312"),
         (Join-Path $env:ProgramFiles "Python311"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313"),
         (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312"),
         (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311"),
         (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links"),
@@ -150,7 +152,7 @@ function Get-DubPythonExecutable {
     }
     $launcher = Get-Command "py.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $launcher) {
-        foreach ($selector in @("-3.12", "-3.11")) {
+        foreach ($selector in @("-3.13", "-3.12", "-3.11")) {
             $resolved = Invoke-DubNativeProbe -FilePath $launcher.Source -Arguments @(
                 $selector, "-c", "import sys; print(sys.executable)"
             )
@@ -160,8 +162,10 @@ function Get-DubPythonExecutable {
         }
     }
     foreach ($candidate in @(
+        (Join-Path $env:ProgramFiles "Python313\python.exe"),
         (Join-Path $env:ProgramFiles "Python312\python.exe"),
         (Join-Path $env:ProgramFiles "Python311\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe"),
         (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
         (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe")
     )) {
@@ -186,7 +190,7 @@ function Get-DubPythonExecutable {
         $summary = Invoke-DubNativeProbe -FilePath $candidate -Arguments @(
             "-c", "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')"
         )
-        if ($summary -match '^(3\.11|3\.12);64$') {
+        if ($summary -match '^(3\.11|3\.12|3\.13);64$') {
             return [IO.Path]::GetFullPath($candidate)
         }
     }
@@ -453,7 +457,7 @@ function Install-DubPrerequisites {
     }
     $python = Get-DubPythonExecutable
     if ([string]::IsNullOrWhiteSpace($python)) {
-        throw "Da cai Python.Python.3.12 nhung khong tim thay Python 3.11/3.12 x64"
+        throw "Da cai Python.Python.3.12 nhung khong tim thay Python 3.11/3.12/3.13 x64"
     }
     $env:DUB_WINDOWS_BASE_PYTHON = $python
 

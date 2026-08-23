@@ -587,7 +587,7 @@
         },
         {
           "name": "thuyetminh:native:source",
-          "value": "Ubuntu 22.04 jammy"
+          "value": "Ubuntu 22.04 jammy hoặc Ubuntu 24.04 noble"
         }
       ],
       "type": "library",
@@ -29632,7 +29632,7 @@
       },
       {
         "name": "thuyetminh:native-lock-sha256",
-        "value": "2b59bd9a3b1cefae6db7555971effb3eaabe554631352cddb618b3b10d15acf3"
+        "value": "8b872fd6185f9954dda5487c4c36635c362607967843cf353e066a6ebf80f8c2"
       },
       {
         "name": "thuyetminh:web-lock-sha256",
@@ -29647,7 +29647,7 @@
         "value": "transitive"
       }
     ],
-    "timestamp": "2026-08-23T07:43:25Z",
+    "timestamp": "2026-08-23T12:29:32Z",
     "tools": {
       "components": [
         {
@@ -29658,7 +29658,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:3cceee35-52cc-4e72-a638-3afc88c17f23",
+  "serialNumber": "urn:uuid:083e3ed3-3713-468f-8642-251f51e44c76",
   "specVersion": "1.6",
   "version": 1
 }

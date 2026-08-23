@@ -383,8 +383,8 @@ if ($selectedComputeMode -eq "gpu") {
 }
 
 $pythonVersion = (& $pythonExecutable -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
-if ($pythonVersion -notin @("3.11", "3.12")) {
-    throw "Can Python 3.11 hoac 3.12 x64; hien tai $pythonVersion"
+if ($pythonVersion -notin @("3.11", "3.12", "3.13")) {
+    throw "Can Python 3.11, 3.12 hoac 3.13 x64; hien tai $pythonVersion"
 }
 $pythonBits = (& $pythonExecutable -c "import struct; print(struct.calcsize('P') * 8)").Trim()
 if ($pythonBits -ne "64") {

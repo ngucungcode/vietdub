@@ -3,7 +3,7 @@
   "components": {
     "ffmpeg": {
       "package": "ffmpeg",
-      "source": "Ubuntu 22.04 jammy"
+      "source": "Ubuntu 22.04 jammy hoặc Ubuntu 24.04 noble"
     },
     "llama_cpp": {
       "release": "b10208",

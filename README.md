@@ -20,8 +20,8 @@ Nguồn duy nhất là file người dùng upload. VietDub không tích hợp to
 
 ### Ubuntu production
 
-- Ubuntu 22.04 x86_64.
-- Python 3.11 hoặc 3.12.
+- Ubuntu 22.04 hoặc 24.04 x86_64.
+- Python 3.11, 3.12 hoặc 3.13. Installer tự chọn interpreter có PyTorch CUDA hoạt động.
 - NVIDIA GPU `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_89`, `sm_90`; `sm_120` experimental.
 - RAM tối thiểu 16 GiB.
 - CUDA 12.6 hoặc 12.8 và driver tương thích.

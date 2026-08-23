@@ -46,7 +46,7 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 
 $pythonExecutable = Get-DubPythonExecutable
 if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
-    Add-Check "python" "error" "Khong tim thay Python 3.11/3.12 x64"
+    Add-Check "python" "error" "Khong tim thay Python 3.11/3.12/3.13 x64"
 } else {
     Add-Check "python" "ok" $pythonExecutable
 }
@@ -69,12 +69,12 @@ $gpuFields = $null
 $gpuArchitecture = $null
 try {
     if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
-        throw "Can Python 3.11/3.12 x64"
+        throw "Can Python 3.11/3.12/3.13 x64"
     }
     $pythonSummary = (& $pythonExecutable -c "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')").Trim()
     $pythonFields = $pythonSummary -split ";"
-    if ($pythonFields.Count -ne 2 -or $pythonFields[0] -notin @("3.11", "3.12") -or $pythonFields[1] -ne "64") {
-        throw "Can Python 3.11/3.12 x64; hien tai $pythonSummary"
+    if ($pythonFields.Count -ne 2 -or $pythonFields[0] -notin @("3.11", "3.12", "3.13") -or $pythonFields[1] -ne "64") {
+        throw "Can Python 3.11/3.12/3.13 x64; hien tai $pythonSummary"
     }
     Add-Check "python-version" "ok" "Python $($pythonFields[0]) x64"
 } catch {

@@ -37,6 +37,43 @@ installer_driver_meets_minimum() {
       && 10#${driver_patch} < minimum_driver_patch)))
 }
 
+installer_supports_ubuntu_release() {
+  case "$1" in
+    22.04|24.04) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+installer_supports_python_version() {
+  case "$1" in
+    3.11|3.12|3.13) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+installer_select_python() {
+  local candidate
+  local candidate_path
+  local version
+  local -a candidates
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    candidates=("${PYTHON_BIN}")
+  else
+    candidates=(python3.13 python3.12 python3.11 python3)
+  fi
+  for candidate in "${candidates[@]}"; do
+    candidate_path="$(command -v -- "${candidate}" 2>/dev/null)" || continue
+    version="$("${candidate_path}" -c \
+      'import sys, torch; assert torch.cuda.is_available(); print(f"{sys.version_info.major}.{sys.version_info.minor}")' \
+      2>/dev/null)" || continue
+    if installer_supports_python_version "${version}"; then
+      printf '%s\n' "${candidate_path}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 main() {
 INSTALLER_VERSION="0.3.8"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/vietdub.git"
@@ -133,7 +170,7 @@ arm_source_transaction() {
 
 usage() {
   cat <<'EOF'
-Cài VietDub trên Ubuntu 22.04 + NVIDIA GPU.
+Cài VietDub trên Ubuntu 22.04/24.04 + NVIDIA GPU.
 
 Cách dùng:
   sudo ./install.sh [tùy chọn]
@@ -336,18 +373,25 @@ if [[ ! -r /etc/os-release ]]; then
 fi
 # shellcheck disable=SC1091
 source /etc/os-release
-[[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "22.04" ]] \
-  || die "Hiện chỉ hỗ trợ Ubuntu 22.04; máy này là ${PRETTY_NAME:-không xác định}"
+[[ "${ID:-}" == "ubuntu" ]] \
+  && installer_supports_ubuntu_release "${VERSION_ID:-}" \
+  || die "Chỉ hỗ trợ Ubuntu 22.04 hoặc 24.04; máy này là ${PRETTY_NAME:-không xác định}"
 [[ "$(uname -m)" == "x86_64" ]] || die "Chỉ hỗ trợ kiến trúc x86_64"
 
 ram_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
 [[ "${ram_kib}" =~ ^[0-9]+$ && "${ram_kib}" -ge 16777216 ]] \
   || die "Cần tối thiểu 16 GiB RAM"
-command -v python3 >/dev/null || die "Không tìm thấy Python 3"
-python3 - <<'PY'
+requested_python="${PYTHON_BIN:-}"
+PYTHON_BIN="$(installer_select_python)" \
+  || die "Không tìm thấy Python 3.11, 3.12 hoặc 3.13 có PyTorch CUDA hoạt động${requested_python:+ tại ${requested_python}}"
+export PYTHON_BIN
+python_version="$("${PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+"${PYTHON_BIN}" -c 'import venv' \
+  || die "Python ${python_version} thiếu module venv"
+"${PYTHON_BIN}" - <<'PY'
 import sys
-if not ((3, 11) <= sys.version_info[:2] < (3, 13)):
-    raise SystemExit(f"Cần Python 3.11 hoặc 3.12, hiện có {sys.version.split()[0]}")
+if not ((3, 11) <= sys.version_info[:2] < (3, 14)):
+    raise SystemExit(f"Cần Python 3.11, 3.12 hoặc 3.13, hiện có {sys.version.split()[0]}")
 PY
 command -v nvidia-smi >/dev/null || die "Không tìm thấy NVIDIA driver/nvidia-smi"
 [[ -x /usr/local/cuda/bin/nvcc ]] || die "Không tìm thấy CUDA toolkit tại /usr/local/cuda"
@@ -368,7 +412,7 @@ fi
 if ! installer_driver_meets_minimum; then
   die "CUDA toolkit ${nvcc_release} cần NVIDIA driver ${minimum_driver_version} trở lên; hiện có ${driver_version}"
 fi
-torch_gpu_report="$(python3 - <<'PY'
+torch_gpu_report="$("${PYTHON_BIN}" - <<'PY'
 try:
     import torch
 except Exception as exc:
@@ -1038,7 +1082,7 @@ fi
 log "Cài đặt hoàn tất"
 log "Thời gian: tổng ${total_seconds}s; bootstrap ${bootstrap_seconds}s; model ${model_install_seconds}s; acceptance ${acceptance_seconds}s"
 log "Kiểm tra: dub doctor && dub stack status"
-log "Bắt đầu: dub search \"Tên phim\" --year 2024"
+log "Bắt đầu: dub upload movie.mkv --i-have-rights --watch"
 }
 
 if [[ "${BASH_SOURCE[0]:-${0}}" == "${0}" ]]; then

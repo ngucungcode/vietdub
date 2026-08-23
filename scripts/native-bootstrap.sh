@@ -45,8 +45,8 @@ export PIP_CACHE_DIR
 
 "${PYTHON_BIN}" - <<'PY'
 import sys
-if not ((3, 11, 0, "candidate", 1) <= sys.version_info < (3, 13)):
-    raise SystemExit(f"Cần Python 3.11 hoặc 3.12, hiện có {sys.version.split()[0]}")
+if not ((3, 11) <= sys.version_info[:2] < (3, 14)):
+    raise SystemExit(f"Cần Python 3.11, 3.12 hoặc 3.13, hiện có {sys.version.split()[0]}")
 PY
 
 export DEBIAN_FRONTEND=noninteractive

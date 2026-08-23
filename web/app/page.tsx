@@ -274,6 +274,14 @@ const statusLabels: Record<string, string> = {
   needs_subtitle_selection: "Cần chọn phụ đề",
 };
 
+const lipSyncFallbackLabels: Record<string, string> = {
+  no_face_detected: "Không thấy mặt khi lời đang phát — giữ nguyên hình.",
+  ambiguous_faces: "Có nhiều mặt, không xác định người nói — giữ nguyên hình.",
+  face_too_small: "Mặt quá nhỏ để sửa an toàn — giữ nguyên hình.",
+  no_active_speech: "Không có cửa sổ lời nói cần sửa khẩu hình.",
+  face_preflight_unavailable: "Không chạy được face-safety gate — giữ nguyên hình.",
+};
+
 const languageOptions = [
   ["auto", "Tự động nhận diện"],
   ["en", "Tiếng Anh"],
@@ -1852,6 +1860,7 @@ export default function Home() {
 
             <fieldset className="timing-profile" disabled={submitting || uploadConfigurationLocked}>
               <legend>Khớp khẩu hình</legend>
+              <small>Face-safety gate: người nói ngoài khung hình, mặt quá nhỏ hoặc nhiều mặt mơ hồ sẽ giữ nguyên hình và chỉ phát audio Việt.</small>
               <label className={lipSyncMode === "off" ? "selected" : ""}>
                 <input
                   type="radio"
@@ -2125,6 +2134,12 @@ export default function Home() {
                       })}
                     </div>
                     {job.error?.message && <p className="job-error">{job.error.message}</p>}
+                    {typeof job.result?.lip_sync_fallback_reason === "string" && (
+                      <p className="job-error">
+                        {lipSyncFallbackLabels[job.result.lip_sync_fallback_reason]
+                          ?? `Bỏ qua khớp khẩu hình: ${job.result.lip_sync_fallback_reason}`}
+                      </p>
+                    )}
                     <div className="job-actions">
                       <button className="small-button" type="button" onClick={() => setSelectedJobId(job.id)}>
                         Chi tiết

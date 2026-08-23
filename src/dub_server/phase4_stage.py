@@ -3708,6 +3708,7 @@ def build_phase4_stage(
                 ffmpeg_binary=Path("ffmpeg"),
             ),
             timeout_seconds=settings.lip_sync_timeout_seconds,
+            face_preflight=True,
         ),
         shutdown_requested=shutdown.is_set,
     )

@@ -2050,6 +2050,9 @@ def create_app(
                 "final_backend": "latentsync-1.6",
                 "final_minimum_vram_mib": 18432,
                 "gpu_acceptance_required": True,
+                "face_preflight": "haar-active-speech-v1",
+                "face_preflight_scope": "job",
+                "offscreen_speaker_behavior": "keep_original_video",
             },
             "cinematic_audio": {
                 "dialogue_removed": True,

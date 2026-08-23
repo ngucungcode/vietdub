@@ -29632,7 +29632,7 @@
       },
       {
         "name": "thuyetminh:native-lock-sha256",
-        "value": "9003866f9977d106b118d6bbcca5423a26118a2220db597b41879532e48fd182"
+        "value": "2b59bd9a3b1cefae6db7555971effb3eaabe554631352cddb618b3b10d15acf3"
       },
       {
         "name": "thuyetminh:web-lock-sha256",
@@ -29647,7 +29647,7 @@
         "value": "transitive"
       }
     ],
-    "timestamp": "2026-08-23T06:20:58Z",
+    "timestamp": "2026-08-23T07:43:25Z",
     "tools": {
       "components": [
         {
@@ -29658,7 +29658,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:5c7cfb48-a8f2-428e-9a47-cd4179a624b4",
+  "serialNumber": "urn:uuid:3cceee35-52cc-4e72-a638-3afc88c17f23",
   "specVersion": "1.6",
   "version": 1
 }

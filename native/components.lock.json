@@ -52,7 +52,7 @@
       "source_path": "/opt/vieneu/source",
       "entrypoint": "/opt/vieneu/vieneu-offline.py",
       "entrypoint_source": "scripts/vieneu-offline.py",
-      "entrypoint_sha256": "7b9b2a8053efff5f27228a49b82a643716c2115a363d1731fb15bfd814b0da26"
+      "entrypoint_sha256": "371626c49042563fa7bb0baabeadb440c9ef54901e85e7ebfcd04e8b02656db6"
     },
     "piper_tts": {
       "package": "piper-tts",

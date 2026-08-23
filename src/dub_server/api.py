@@ -382,6 +382,7 @@ class JobCreateRequest(BaseModel):
     source_language: str = Field(default="auto", min_length=2, max_length=35)
     subtitle_mode: Literal["prefer", "manual", "asr"] = "prefer"
     timing_profile: Literal["natural", "strict"] = "natural"
+    lip_sync_mode: Literal["off", "draft", "final"] = "off"
     models: ModelSelection = Field(default_factory=ModelSelection)
     voice: VoiceSelection | None = None
     voice_rights_confirmed: bool = False
@@ -398,6 +399,7 @@ class UploadCreateRequest(BaseModel):
     rights_confirmed: bool = False
     source_language: str = Field(default="auto", min_length=2, max_length=35)
     timing_profile: Literal["natural", "strict"] = "natural"
+    lip_sync_mode: Literal["off", "draft", "final"] = "off"
     models: ModelSelection = Field(default_factory=ModelSelection)
     voice: VoiceSelection | None = None
     voice_rights_confirmed: bool = False
@@ -1771,7 +1773,7 @@ def create_app(
                 await owned_admin_client.aclose()
 
     application = FastAPI(
-        title="VietDub",
+        title="Thuyết Minh Offline GPU",
         version=__version__,
         description="Điều khiển tải nguồn hợp pháp và pipeline thuyết minh cục bộ.",
         lifespan=lifespan,
@@ -2040,6 +2042,15 @@ def create_app(
             },
             "outputs": ["mp4", "srt", "timing-report.json"],
             "offline_inference": True,
+            "lip_sync": {
+                "modes": ["off", "draft", "final"],
+                "default": "off",
+                "draft_backend": "musetalk-1.5",
+                "draft_minimum_vram_mib": 4096,
+                "final_backend": "latentsync-1.6",
+                "final_minimum_vram_mib": 18432,
+                "gpu_acceptance_required": True,
+            },
             "cinematic_audio": {
                 "dialogue_removed": True,
                 "music_and_effects_preserved": True,

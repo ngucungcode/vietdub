@@ -1159,6 +1159,11 @@ def upload_local_media(
         "--timing-profile",
         help="natural ưu tiên nhịp nói; strict ưu tiên timestamp gốc.",
     ),
+    lip_sync_mode: str = typer.Option(
+        "off",
+        "--lip-sync",
+        help="off giữ nguyên hình; draft dùng MuseTalk; final dùng LatentSync.",
+    ),
     asr_model: str | None = typer.Option(None, "--asr-model"),
     translation_model: str | None = typer.Option(None, "--translation-model"),
     separation_model: str | None = typer.Option(None, "--separation-model"),
@@ -1210,6 +1215,8 @@ def upload_local_media(
         )
     if timing_profile not in {"natural", "strict"}:
         raise typer.BadParameter("--timing-profile phải là natural hoặc strict")
+    if lip_sync_mode not in {"off", "draft", "final"}:
+        raise typer.BadParameter("--lip-sync phải là off, draft hoặc final")
     if output is not None and not wait:
         raise typer.BadParameter("--output chỉ dùng cùng --wait", param_hint="--output")
     voice = None
@@ -1241,6 +1248,7 @@ def upload_local_media(
                 "rights_confirmed": True,
                 "source_language": normalized_language or "auto",
                 "timing_profile": timing_profile,
+                "lip_sync_mode": lip_sync_mode,
                 "models": {
                     "asr": asr_model,
                     "translation": translation_model,
@@ -1394,6 +1402,11 @@ def run_job(
         "--timing-profile",
         help="natural ưu tiên nhịp nói; strict ưu tiên timestamp gốc.",
     ),
+    lip_sync_mode: str = typer.Option(
+        "off",
+        "--lip-sync",
+        help="off giữ nguyên hình; draft dùng MuseTalk; final dùng LatentSync.",
+    ),
     asr_model: str | None = typer.Option(None, "--asr-model"),
     translation_model: str | None = typer.Option(None, "--translation-model"),
     separation_model: str | None = typer.Option(None, "--separation-model"),
@@ -1429,6 +1442,8 @@ def run_job(
         raise typer.BadParameter("Chế độ phụ đề phải là prefer, manual hoặc asr")
     if timing_profile not in {"natural", "strict"}:
         raise typer.BadParameter("--timing-profile phải là natural hoặc strict")
+    if lip_sync_mode not in {"off", "draft", "final"}:
+        raise typer.BadParameter("--lip-sync phải là off, draft hoặc final")
     voice = None
     if voice_id or voice_reference:
         if not voice_rights_confirmed:
@@ -1443,6 +1458,7 @@ def run_job(
         "source_language": source_language,
         "subtitle_mode": subtitle_mode,
         "timing_profile": timing_profile,
+        "lip_sync_mode": lip_sync_mode,
         "models": {
             "asr": asr_model,
             "translation": translation_model,

@@ -37,6 +37,13 @@ from .audio_separation import (
     SeparationProgress,
     TigerDnrSubprocessRunner,
 )
+from .lip_sync import (
+    ExternalLipSyncProcessor,
+    LipSyncBackendPaths,
+    LipSyncError,
+    LipSyncMode,
+    LipSyncResult,
+)
 from .llama_translation import LlamaServerTranslator, LlamaTranslationError
 from .model_registry import (
     ModelNotFoundError,
@@ -368,6 +375,7 @@ class Phase4Stage:
         timing_rewrite_max_attempts: int = 3,
         timing_fitter_factory: TimingFitterFactory | None = None,
         exporter_factory: ExporterFactory | None = None,
+        lip_sync_processor: ExternalLipSyncProcessor | None = None,
         model_resolver: ModelResolver = resolve_verified_model,
         shutdown_requested: Callable[[], bool] | None = None,
     ) -> None:
@@ -423,6 +431,7 @@ class Phase4Stage:
                 ),
             )
         )
+        self._lip_sync_processor = lip_sync_processor
 
     async def run(self, job_id: str) -> JobRecord:
         job = self._store.get_job(job_id)
@@ -535,6 +544,10 @@ class Phase4Stage:
                 error.message_vi,
                 error.retryable,
             )
+        except LipSyncError as error:
+            if error.code == "lip_sync_cancelled":
+                return self._store.get_job(job_id)
+            return self._fail(job_id, error.code, error.message_vi, error.retryable)
         except ModelNotFoundError:
             return self._fail(
                 job_id,
@@ -3060,6 +3073,7 @@ class Phase4Stage:
         separation_sha256: str,
         timeline_sha256: str,
         tts_model_tree_sha256: str,
+        lip_sync_mode: LipSyncMode,
     ) -> ExportedMedia | None:
         """Reuse only an unchanged MP4 previously verified by the exporter."""
 
@@ -3071,6 +3085,7 @@ class Phase4Stage:
             "separation_sha256": separation_sha256,
             "timeline_sha256": timeline_sha256,
             "tts_model_tree_sha256": tts_model_tree_sha256,
+            "lip_sync_mode": lip_sync_mode.value,
             "video_track_count": 1,
             "audio_track_count": 1,
             "audio_codec": "aac",
@@ -3133,6 +3148,7 @@ class Phase4Stage:
                 "Checkpoint timeline chưa hoàn tất",
                 retryable=True,
             )
+        lip_sync_mode = self._lip_sync_mode(self._store.get_job(job_id))
         checkpoint = self._store.get_checkpoint(job_id, JobStage.EXPORT)
         exported = (
             None
@@ -3145,6 +3161,7 @@ class Phase4Stage:
                 separation_sha256=separation.checksum_sha256,
                 timeline_sha256=str(timing.payload["timeline_sha256"]),
                 tts_model_tree_sha256=tts_model.tree_sha256,
+                lip_sync_mode=lip_sync_mode,
             )
         )
 
@@ -3198,10 +3215,47 @@ class Phase4Stage:
                         "Timeline đầu ra đã được căn theo luồng hình; phần tiếng thiếu "
                         "được đệm im lặng hoặc phần vượt quá hình được loại bỏ",
                     )
+            lip_sync = await self._apply_lip_sync(
+                job_id,
+                mode=lip_sync_mode,
+                exported=exported,
+                narration_audio=Path(str(timing.payload["timeline_path"])),
+            )
+            exported = ExportedMedia(
+                path=lip_sync.path,
+                duration_us=exported.duration_us,
+                video_start_us=exported.video_start_us,
+                audio_start_us=exported.audio_start_us,
+                audio_codec=exported.audio_codec,
+                size_bytes=lip_sync.path.stat().st_size,
+            )
+        else:
+            lip_sync = LipSyncResult(
+                path=exported.path,
+                mode=lip_sync_mode,
+                backend=(
+                    str(checkpoint.payload.get("lip_sync_backend"))
+                    if checkpoint is not None
+                    and isinstance(checkpoint.payload.get("lip_sync_backend"), str)
+                    else None
+                ),
+                applied=bool(
+                    checkpoint is not None
+                    and checkpoint.payload.get("lip_sync_applied") is True
+                ),
+                fallback_reason=(
+                    str(checkpoint.payload.get("lip_sync_fallback_reason"))
+                    if checkpoint is not None
+                    and isinstance(
+                        checkpoint.payload.get("lip_sync_fallback_reason"), str
+                    )
+                    else None
+                ),
+            )
         self._set_status(
             job_id,
             JobStatus.VERIFYING,
-            JobStage.VERIFY,
+            JobStage.LIP_SYNC if lip_sync.applied else JobStage.VERIFY,
             985,
             detail_updates={"phase4_step": "verify"},
             force_reset=True,
@@ -3214,6 +3268,7 @@ class Phase4Stage:
             tts_model=tts_model,
             fitted_blocks=fitted_blocks,
             timing_payload=timing.payload,
+            lip_sync=lip_sync,
         )
         self._store.save_checkpoint(
             job_id,
@@ -3235,6 +3290,10 @@ class Phase4Stage:
                 "separation_sha256": separation.checksum_sha256,
                 "timeline_sha256": str(timing.payload["timeline_sha256"]),
                 "tts_model_tree_sha256": tts_model.tree_sha256,
+                "lip_sync_mode": lip_sync.mode.value,
+                "lip_sync_backend": lip_sync.backend,
+                "lip_sync_applied": lip_sync.applied,
+                "lip_sync_fallback_reason": lip_sync.fallback_reason,
             },
         )
         current = self._store.get_job(job_id)
@@ -3254,6 +3313,65 @@ class Phase4Stage:
             result=result,
         )
 
+    async def _apply_lip_sync(
+        self,
+        job_id: str,
+        *,
+        mode: LipSyncMode,
+        exported: ExportedMedia,
+        narration_audio: Path,
+    ) -> LipSyncResult:
+        if mode is LipSyncMode.OFF:
+            return LipSyncResult(
+                path=exported.path,
+                mode=mode,
+                backend=None,
+                applied=False,
+            )
+        if self._lip_sync_processor is None:
+            raise LipSyncError(
+                "lip_sync_not_configured",
+                "Backend tạo khẩu hình chưa được cấu hình",
+                retryable=False,
+            )
+        self._set_status(
+            job_id,
+            JobStatus.VERIFYING,
+            JobStage.LIP_SYNC,
+            980,
+            detail_updates={
+                "phase4_step": "lip_sync",
+                "lip_sync_mode": mode.value,
+            },
+        )
+        source_sha256 = await asyncio.to_thread(self._file_sha256, exported.path)
+        result = await self._lip_sync_processor.render(
+            mode=mode,
+            dubbed_video=exported.path,
+            narration_audio=narration_audio,
+            output_path=exported.path,
+            work_dir=self._job_dir(job_id) / "lip-sync",
+            cancellation=lambda: self._is_cancel_requested(job_id),
+        )
+        self._raise_if_cancelled(job_id)
+        output_sha256 = await asyncio.to_thread(self._file_sha256, result.path)
+        self._store.save_checkpoint(
+            job_id,
+            JobStage.LIP_SYNC,
+            {
+                "schema_version": 1,
+                "completed": True,
+                "mode": result.mode.value,
+                "backend": result.backend,
+                "applied": result.applied,
+                "fallback_reason": result.fallback_reason,
+                "source_dubbed_sha256": source_sha256,
+                "output_path": str(result.path),
+                "output_sha256": output_sha256,
+            },
+        )
+        return result
+
     async def _result_payload(
         self,
         job_id: str,
@@ -3264,6 +3382,7 @@ class Phase4Stage:
         tts_model: VerifiedModel,
         fitted_blocks: Sequence[FittedNarrationBlock],
         timing_payload: Mapping[str, Any],
+        lip_sync: LipSyncResult,
     ) -> dict[str, Any]:
         quality_counts = {
             value.value: sum(block.quality is value for block in fitted_blocks)
@@ -3294,6 +3413,10 @@ class Phase4Stage:
             "timing_quality": quality_counts,
             "original_dialogue_removed": True,
             "music_and_effects_preserved": True,
+            "lip_sync_mode": lip_sync.mode.value,
+            "lip_sync_backend": lip_sync.backend,
+            "lip_sync_applied": lip_sync.applied,
+            "lip_sync_fallback_reason": lip_sync.fallback_reason,
             "job_id": job_id,
         }
 
@@ -3438,6 +3561,18 @@ class Phase4Stage:
             ) from error
 
     @staticmethod
+    def _lip_sync_mode(job: JobRecord) -> LipSyncMode:
+        raw = job.spec.get("lip_sync_mode", LipSyncMode.OFF.value)
+        try:
+            return LipSyncMode(raw)
+        except (TypeError, ValueError) as error:
+            raise LipSyncError(
+                "lip_sync_mode_invalid",
+                "Chế độ khớp khẩu hình của job không hợp lệ",
+                retryable=False,
+            ) from error
+
+    @staticmethod
     def _checkpoint_profile_matches(
         payload: Mapping[str, Any], timing_profile: TimingProfile
     ) -> bool:
@@ -3562,6 +3697,18 @@ def build_phase4_stage(
         timing_rewrite_max_attempts=settings.timing_rewrite_max_attempts,
         narration_target_lufs=settings.narration_target_lufs,
         accompaniment_target_lufs=-24.0,
+        lip_sync_processor=ExternalLipSyncProcessor(
+            paths=LipSyncBackendPaths(
+                latentsync_python=settings.latentsync_python,
+                latentsync_source=settings.latentsync_source_dir,
+                latentsync_checkpoint=settings.latentsync_checkpoint_path,
+                latentsync_config=settings.latentsync_config_path,
+                musetalk_python=settings.musetalk_python,
+                musetalk_source=settings.musetalk_source_dir,
+                ffmpeg_binary=Path("ffmpeg"),
+            ),
+            timeout_seconds=settings.lip_sync_timeout_seconds,
+        ),
         shutdown_requested=shutdown.is_set,
     )
 

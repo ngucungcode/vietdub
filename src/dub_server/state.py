@@ -60,6 +60,7 @@ class JobStage(StrEnum):
     TIMING = "timing"
     MIX = "mix"
     EXPORT = "export"
+    LIP_SYNC = "lip_sync"
     VERIFY = "verify"
     DONE = "done"
 

@@ -1,4 +1,6 @@
 # Native runtime except provider-managed PyTorch.
+# Torch 2.11 provider images require setuptools<82.
+setuptools==80.9.0
 fastapi==0.139.2
 httpx==0.28.1
 pydantic-settings==2.14.2

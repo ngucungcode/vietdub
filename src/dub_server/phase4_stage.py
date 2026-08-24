@@ -3557,7 +3557,7 @@ def build_phase4_stage(
         separation_chunk_seconds=settings.separation_chunk_seconds,
         separation_context_seconds=settings.separation_context_seconds,
         separation_batch_size=settings.separation_batch_size,
-        separation_device=settings.compute_mode,
+        separation_device="cuda" if settings.compute_mode == "gpu" else "cpu",
         timing_rewriter_factory=timing_rewriter_factory,
         timing_rewrite_max_attempts=settings.timing_rewrite_max_attempts,
         narration_target_lufs=settings.narration_target_lufs,

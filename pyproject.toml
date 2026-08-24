@@ -35,7 +35,7 @@ gpu = [
   "sea-g2p==0.7.20",
   "soundfile==0.13.1",
   "soxr==1.0.0",
-  "torch==2.10.0",
+  "torch==2.13.0",
   "transformers==5.5.4",
 ]
 managed-gpu = [

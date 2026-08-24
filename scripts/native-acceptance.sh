@@ -38,7 +38,7 @@ if [[ "${recovered}" != true ]]; then
   exit 1
 fi
 
-for port in 8080; do
+for port in "${DUB_API_PORT}"; do
   addresses="$(ss -H -lnt "sport = :${port}" | awk '{print $4}')"
   if [[ -z "${addresses}" ]] || printf '%s\n' "${addresses}" | grep -Evq '^127\.0\.0\.1:'; then
     echo "Cổng ${port} không chỉ bind loopback" >&2
@@ -46,7 +46,7 @@ for port in 8080; do
   fi
 done
 
-curl --silent --show-error --fail http://127.0.0.1:8080/v1/health \
+curl --silent --show-error --fail "http://127.0.0.1:${DUB_API_PORT}/v1/health" \
   | jq -e '.status == "ok" and .gpu.ready == true and .database.journal_mode == "wal"' \
   >/dev/null
 

@@ -79,6 +79,7 @@ from .gpu import (
     read_gpu_report,
 )
 from .media_probe import FfprobeMediaProbe, MediaProbe, MediaProbeError
+from .model_manager import install_model
 from .openai_translation import (
     OpenAITranslator,
     is_loopback_api_base_url,
@@ -1376,6 +1377,12 @@ def _openai_key_configured(settings: Settings) -> bool:
 # by an API restart is not in this set, so it can be resumed.
 _OPENAI_TRANSLATION_RUNNING: set[str] = set()
 
+# Dashboard model-install jobs, keyed by model id or "6gb" for the
+# preset job. Each value is {"job", "status", "models": [...], "error"}.
+# A restart clears this in-memory map; a download interrupted that way
+# is safe to re-run because verified models are skipped on start.
+_MODEL_INSTALL_JOBS: dict[str, dict[str, Any]] = {}
+
 
 class OpenAiKeyRequest(BaseModel):
     """Write-only OpenAI key upload. The key is never returned."""
@@ -2025,6 +2032,181 @@ def create_app(
             authenticated=False,
             restart_required=True,
         )
+
+    # --- Dashboard model installation -------------------------------------
+    # The 6 GB preset (docs/profile-6gb.md) needs exactly these local
+    # models; translation runs through an API, so no local MT model is
+    # in the list. Install jobs run in the background because a model
+    # download is gigabytes and must not block the API event loop; the
+    # frontend polls /v1/models/install-status and refreshes the catalog
+    # when a job finishes. Installs are idempotent: a model that is
+    # already installed and verified is skipped, never re-downloaded.
+    six_gb_preset_model_ids = (
+        "asr-faster-whisper-small",
+        "separation-tiger-dnr",
+        "tts-neucodec-onnx-int8",
+        "tts-vieneu-v2",
+    )
+
+    def _load_catalog_or_raise() -> ModelCatalog:
+        try:
+            return load_model_catalog(
+                configured_settings.models_lock_path,
+                configured_settings.models_dir,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "model_catalog_missing",
+                    "message": "Không tìm thấy danh mục model cục bộ",
+                    "retryable": False,
+                },
+            ) from exc
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "model_catalog_invalid",
+                    "message": "Danh mục model cục bộ không hợp lệ",
+                    "retryable": False,
+                },
+            ) from exc
+
+    def _run_model_installs(job_key: str) -> None:
+        """Background worker for one install job (sync: runs off-loop).
+
+        Runs in Starlette's threadpool, one model at a time, in list
+        order. A failed model stops the job; the models already done
+        stay installed, and re-running the job resumes after them
+        because installed-and-verified models are skipped on start.
+        """
+
+        job = _MODEL_INSTALL_JOBS[job_key]
+        job["status"] = "running"
+        job["error"] = None
+        for entry in job["models"]:
+            if entry["status"] == "skipped":
+                continue
+            entry["status"] = "running"
+            entry["error"] = None
+            try:
+                install_model(
+                    configured_settings.models_lock_path,
+                    configured_settings.models_dir,
+                    entry["id"],
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced to dashboard
+                entry["status"] = "failed"
+                entry["error"] = str(exc)[:500]
+                job["status"] = "failed"
+                job["error"] = entry["error"]
+                return
+            entry["status"] = "done"
+        job["status"] = "done"
+
+    @application.get("/v1/models/install-status")
+    def model_install_status() -> dict[str, Any]:
+        """Tracked install jobs (single models and the 6 GB preset)."""
+
+        return {"jobs": list(_MODEL_INSTALL_JOBS.values())}
+
+    @application.post(
+        "/v1/models/install-6gb",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def install_6gb_preset_models(
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        """Install the missing local models of the 6 GB preset.
+
+        Registered before the single-model route below so the literal
+        path is never swallowed by the ``{model_id}`` parameter.
+        """
+
+        existing = _MODEL_INSTALL_JOBS.get("6gb")
+        if existing is not None and existing["status"] == "running":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "model_install_in_progress",
+                    "message": "Đang tải model cho preset 6GB, vui lòng chờ",
+                    "retryable": True,
+                },
+            )
+        catalog = _load_catalog_or_raise()
+        by_id = {entry.id: entry for entry in catalog.models}
+        entries = []
+        for model_id in six_gb_preset_model_ids:
+            entry = by_id.get(model_id)
+            ready = bool(entry is not None and entry.installed and entry.valid)
+            entries.append(
+                {
+                    "id": model_id,
+                    "status": "skipped" if ready else "pending",
+                    "error": None,
+                }
+            )
+        job = {"job": "6gb", "status": "pending", "models": entries, "error": None}
+        _MODEL_INSTALL_JOBS["6gb"] = job
+        if all(entry["status"] == "skipped" for entry in entries):
+            job["status"] = "done"
+            return job
+        background_tasks.add_task(_run_model_installs, "6gb")
+        job["status"] = "running"
+        return job
+
+    @application.post(
+        "/v1/models/{model_id}/install",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def install_single_model(
+        model_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        """Install one locked model in the background (or skip if ready)."""
+
+        existing = _MODEL_INSTALL_JOBS.get(model_id)
+        if existing is not None and existing["status"] == "running":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "model_install_in_progress",
+                    "message": "Model này đang được tải, vui lòng chờ",
+                    "retryable": True,
+                },
+            )
+        catalog = _load_catalog_or_raise()
+        by_id = {entry.id: entry for entry in catalog.models}
+        entry = by_id.get(model_id)
+        if entry is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "model_not_found",
+                    "message": "Không có model này trong danh mục",
+                    "retryable": False,
+                },
+            )
+        ready = bool(entry.installed and entry.valid)
+        job = {
+            "job": model_id,
+            "status": "done" if ready else "pending",
+            "models": [
+                {
+                    "id": model_id,
+                    "status": "skipped" if ready else "pending",
+                    "error": None,
+                }
+            ],
+            "error": None,
+        }
+        _MODEL_INSTALL_JOBS[model_id] = job
+        if ready:
+            return job
+        background_tasks.add_task(_run_model_installs, model_id)
+        job["status"] = "running"
+        return job
 
     @application.get("/v1/models", response_model=ModelCatalog)
     def models() -> ModelCatalog:

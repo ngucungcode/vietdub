@@ -8,7 +8,36 @@
 ## Áp dụng trong 1 nút bấm (khuyến nghị)
 
 Trên dashboard, trong form tạo job → "Model và giọng nói nâng cao" →
-**“Áp dụng cấu hình chuẩn 6GB VRAM”**. Nút này set cho job đó:
+**“Áp dụng cấu hình chuẩn 6GB VRAM”**. Nút này chỉ set cấu hình cho
+job đó — nó **không tự tải model**. Tải model là nút riêng ngay bên
+cạnh (xem mục dưới), vì model nặng hàng GB và không nên tự tải ngầm
+khi bạn chỉ đang chọn cấu hình.
+
+## Tải model còn thiếu từ dashboard
+
+- **“Tải model còn thiếu cho preset 6GB”** (cạnh nút áp preset): tải
+  nền trên server đúng 4 model của preset — ASR small, TIGER,
+  Neucodec, VieNeu v2 — theo đúng thứ tự đó. Model nào đã cài và xác
+  minh rồi thì bỏ qua, không tải lại.
+- **“Tải model”** ở từng dòng trong mục Kho model: tải lẻ 1 model.
+- Tiến trình: `POST /v1/models/install-6gb` hoặc
+  `POST /v1/models/{model_id}/install` → 202, trạng thái xem ở
+  `GET /v1/models/install-status`; dashboard tự poll mỗi 5 giây (tối
+  đa 30 phút) rồi làm mới danh mục. Tải xong model hiện “SẴN SÀNG”.
+- Nếu 1 model lỗi giữa chừng, job tải dừng ở đó (model đã xong vẫn
+  giữ nguyên); bấm tải lại để tiếp tục từ model lỗi, vì model đã
+  xong được bỏ qua.
+- Tải khi đang rảnh, đừng tải đúng lúc job đang chạy stage dùng model
+  đó. Restart server giữa chừng tải cũng an toàn: tải lại sẽ bỏ qua
+  model đã xong.
+- Cách cũ vẫn dùng được: từ thư mục source trên Windows,
+  `.\windows\dub.ps1 models install tts-vieneu-v2` (và
+  `tts-neucodec-onnx-int8`). Lưu ý: lệnh CLI `models install-profile
+  balanced` **không** dùng được cho card 6GB — nó đòi tối thiểu 8192
+  MiB VRAM và chặn ở CPU mode; tải lẻ từng model (hoặc nút dashboard)
+  thì không bị 2 rào đó.
+
+Bảng cấu hình preset set cho job đó:
 
 | Bước | Giá trị preset | VRAM khi chạy riêng | Vì sao |
 |---|---|---|---|

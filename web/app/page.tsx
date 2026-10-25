@@ -56,6 +56,19 @@ type ModelCatalog = {
   models: ModelEntry[];
 };
 
+type ModelInstallEntry = {
+  id: string;
+  status: string;
+  error?: string | null;
+};
+
+type ModelInstallJob = {
+  job: string;
+  status: string;
+  models: ModelInstallEntry[];
+  error?: string | null;
+};
+
 type JobError = {
   code?: string;
   message?: string;
@@ -920,6 +933,10 @@ export default function Home() {
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [settingsProblem, setSettingsProblem] = useState<string | null>(null);
   const [translateKeyMissing, setTranslateKeyMissing] = useState(false);
+  const [installJobs, setInstallJobs] = useState<ModelInstallJob[]>([]);
+  const [installBusy, setInstallBusy] = useState<string | null>(null);
+  const [installNotice, setInstallNotice] = useState<string | null>(null);
+  const [installProblem, setInstallProblem] = useState<string | null>(null);
   const [review, setReview] = useState<ReviewView | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
@@ -1776,6 +1793,86 @@ export default function Home() {
     }
   }
 
+  const refreshInstallStatus = useCallback(async () => {
+    try {
+      const result = await api<{ jobs: ModelInstallJob[] }>("/models/install-status");
+      setInstallJobs(result.jobs);
+      return result.jobs;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  async function pollInstallJob(jobKey: string): Promise<ModelInstallJob | null> {
+    // Model có thể nặng hàng GB nên poll mỗi 5 giây, tối đa 30 phút;
+    // quá hạn thì dừng poll nhưng tiến trình tải trên server vẫn chạy,
+    // bấm "Làm mới" ở mục Model để kiểm tra lại sau.
+    for (let attempt = 0; attempt < 360; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 5000));
+      const jobs = await refreshInstallStatus();
+      const job = jobs?.find((item) => item.job === jobKey);
+      if (job && (job.status === "done" || job.status === "failed")) {
+        await refreshCatalog();
+        return job;
+      }
+    }
+    await refreshInstallStatus();
+    return null;
+  }
+
+  async function installSingleModel(modelId: string) {
+    setInstallBusy(modelId);
+    setInstallProblem(null);
+    setInstallNotice(null);
+    try {
+      await api(`/models/${encodeURIComponent(modelId)}/install`, { method: "POST" });
+      const job = await pollInstallJob(modelId);
+      if (job?.status === "done") {
+        setInstallNotice(`Đã tải xong model ${modelId}.`);
+      } else if (job?.status === "failed") {
+        setInstallProblem(job.error || `Tải model ${modelId} thất bại.`);
+      } else {
+        setInstallNotice(`Model ${modelId} vẫn đang tải trên server (quá 30 phút poll). Bấm 'Làm mới' ở mục Model để kiểm tra lại.`);
+      }
+    } catch (error) {
+      setInstallProblem(messageOf(error, `Không thể bắt đầu tải model ${modelId}.`));
+    } finally {
+      setInstallBusy(null);
+    }
+  }
+
+  async function install6gbModels() {
+    setInstallBusy("6gb");
+    setInstallProblem(null);
+    setInstallNotice(null);
+    try {
+      const started = await api<ModelInstallJob>("/models/install-6gb", { method: "POST" });
+      if (started.status === "done") {
+        setInstallNotice("Preset 6GB đã đủ model — không cần tải thêm.");
+        await refreshCatalog();
+        return;
+      }
+      const job = await pollInstallJob("6gb");
+      if (job?.status === "done") {
+        setInstallNotice("Đã tải xong các model còn thiếu cho preset 6GB. Giờ tạo job với preset đó là chạy được.");
+      } else if (job?.status === "failed") {
+        const failed = job.models.filter((item) => item.status === "failed").map((item) => item.id).join(", ");
+        setInstallProblem(`Tải preset 6GB thất bại ở: ${failed || "không rõ model"}. ${job.error ?? ""}`);
+      } else {
+        setInstallNotice("Preset 6GB vẫn đang tải trên server (quá 30 phút poll). Bấm 'Làm mới' ở mục Model để kiểm tra lại.");
+      }
+    } catch (error) {
+      setInstallProblem(messageOf(error, "Không thể bắt đầu tải preset 6GB."));
+    } finally {
+      setInstallBusy(null);
+    }
+  }
+
+  function installEntryFor(modelId: string): ModelInstallEntry | null {
+    const job = installJobs.find((item) => item.job === modelId);
+    return job?.models[0] ?? null;
+  }
+
   function applyApiProviderPreset(value: string) {
     setApiProvider(value);
     const preset = apiProviderPresets.find((item) => item.value === value);
@@ -2161,7 +2258,32 @@ export default function Home() {
                 >
                   Áp dụng cấu hình chuẩn 6GB VRAM
                 </button>
+                <button
+                  className="small-button download"
+                  type="button"
+                  disabled={installBusy === "6gb" || submitting || uploadConfigurationLocked}
+                  onClick={() => void install6gbModels()}
+                >
+                  {installBusy === "6gb" ? "Đang tải model…" : "Tải model còn thiếu cho preset 6GB"}
+                </button>
               </div>
+              {(installNotice || installProblem) && (
+                <div className={`notice ${installProblem ? "error" : "success"}`} role="status">
+                  {installProblem ?? installNotice}
+                </div>
+              )}
+              {(() => {
+                const job = installJobs.find((item) => item.job === "6gb");
+                if (!job || job.status === "done") return null;
+                const done = job.models.filter((item) => item.status === "done" || item.status === "skipped").length;
+                return (
+                  <p className="helper-copy">
+                    Đang tải preset 6GB: {done}/{job.models.length} model xong
+                    {job.models.filter((item) => item.status === "running").map((item) => ` — đang tải ${item.id}`).join("")}.
+                    Tải chạy nền trên server, cứ để trang mở hoặc quay lại mục Model kiểm tra sau.
+                  </p>
+                );
+              })()}
               <p className="helper-copy">
                 Preset 6GB: ASR small, TIGER chunk 30s / context 2s / batch 1, VieNeu v2, dịch qua API (0 VRAM).
                 Nhà cung cấp mặc định là DeepSeek — đổi ở ô nhà cung cấp nếu bạn dùng API khác.
@@ -3426,8 +3548,14 @@ export default function Home() {
           <button className="small-button" type="button" onClick={() => void refreshCatalog()}>Làm mới danh mục</button>
         </div>
         <p className="section-intro">
-          Dashboard chỉ chọn model đã cài và xác minh; việc tải model là thao tác quản trị rõ ràng qua CLI, không xảy ra trong lúc xử lý job.
+          Dashboard chỉ chọn model đã cài và xác minh. Bấm “Tải model” để tải nền trên server (không xảy ra trong lúc xử lý job); tải xong thì model hiện “SẴN SÀNG”.
+          Nút “Tải model còn thiếu cho preset 6GB” ở form tạo job tải đúng 4 model của preset đó.
         </p>
+        {(installNotice || installProblem) && (
+          <div className={`notice ${installProblem ? "error" : "success"}`} role="status">
+            {installProblem ?? installNotice}
+          </div>
+        )}
         <div className="model-catalog">
           {catalog.models.map((model) => (
             <article key={model.id} className={model.installed && model.valid ? "ready" : "missing"}>
@@ -3442,6 +3570,26 @@ export default function Home() {
                 <small>{model.minimum_vram_mib ? `${Math.ceil(model.minimum_vram_mib / 1024)} GB VRAM` : "CPU"}</small>
                 <small>{model.license}</small>
               </div>
+              {!(model.installed && model.valid) && (
+                <div className="detail-actions">
+                  <button
+                    className="small-button download"
+                    type="button"
+                    disabled={installBusy === model.id}
+                    onClick={() => void installSingleModel(model.id)}
+                  >
+                    {installBusy === model.id ? "Đang tải…" : "Tải model"}
+                  </button>
+                  {(() => {
+                    const entry = installEntryFor(model.id);
+                    if (!entry) return null;
+                    if (entry.status === "running") return <small>Đang tải trên server…</small>;
+                    if (entry.status === "failed") return <small>Tải thất bại{entry.error ? `: ${entry.error}` : ""}</small>;
+                    if (entry.status === "done") return <small>Đã tải xong — bấm “Làm mới danh mục” nếu chưa hiện SẴN SÀNG.</small>;
+                    return null;
+                  })()}
+                </div>
+              )}
             </article>
           ))}
           {!catalog.models.length && <p className="helper-copy">Danh mục model chưa sẵn sàng.</p>}

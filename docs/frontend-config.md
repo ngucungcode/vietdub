@@ -39,6 +39,28 @@ giọng, glossary), form còn có:
   2 s / batch 1, VieNeu v2, backend `api` (mặc định DeepSeek, đổi
   được). Ba ô chunk/context/batch tách thoại cũng sửa tay được và
   chỉ áp cho job đó (Phase 4 quay về mặc định máy chủ cho job khác).
+  Nút này chỉ set cấu hình, không tải model — tải model là nút riêng
+  ngay bên cạnh (xem dưới).
+
+## Tải model từ dashboard
+
+Mục Kho model và form tạo job đều có nút tải, thay cho việc phải gõ
+lệnh CLI:
+
+- Mỗi dòng model chưa sẵn sàng có nút **“Tải model”** →
+  `POST /v1/models/{model_id}/install` → 202, tải nền trên server.
+- Nút **“Tải model còn thiếu cho preset 6GB”** ở form tạo job →
+  `POST /v1/models/install-6gb` → 202, tải nền đúng 4 model của
+  preset theo thứ tự ASR small, TIGER, Neucodec, VieNeu v2; model đã
+  cài và xác minh thì bỏ qua.
+- Trạng thái: `GET /v1/models/install-status`; dashboard poll mỗi
+  5 giây (tối đa 30 phút) rồi làm mới danh mục. Model lỗi giữa chừng
+  thì job tải dừng ở đó, bấm tải lại sẽ tiếp tục từ model lỗi (model
+  đã xong được bỏ qua). Restart server giữa chừng tải cũng an toàn
+  theo cùng cơ chế.
+- Tải model là thao tác quản trị rõ ràng, không xảy ra ngầm trong lúc
+  xử lý job; nên tải khi đang rảnh, đừng tải đúng lúc job đang chạy
+  stage dùng model đó.
 - `require_final_approval` — **mặc định BẬT**. Job sẽ dừng ở trạng thái
   `awaiting_approval` thay vì hoàn tất ngay.
 - `speaker_voices` — textarea, mỗi dòng `NHÃN=voice_id` hoặc

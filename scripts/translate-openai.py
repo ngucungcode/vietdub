@@ -124,6 +124,9 @@ def main() -> int:
                     settings=settings,
                     # Không truyền gpu_report: bước OpenAI không dùng VRAM nên
                     # bỏ qua preflight kiểm tra VRAM của worker.
+                    # Chỉ nhận job đã chọn backend openai (xem worker.py):
+                    # job dịch local vẫn do worker offline xử lý.
+                    translation_backend="openai",
                 )
             )
             if did_work:

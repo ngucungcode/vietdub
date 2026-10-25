@@ -2071,7 +2071,7 @@ footer {
     z-index: 20;
     top: 0;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     border: 1px solid var(--line);
     background: rgba(11, 14, 13, 0.97);
   }
@@ -2309,4 +2309,31 @@ footer {
   border-color: #56634f;
   background: #101411;
   outline: none;
+}
+
+/* Cài đặt và duyệt kết quả */
+.settings-defaults {
+  margin-top: 18px;
+}
+
+.notice a {
+  color: var(--acid);
+}
+
+.helper-copy a {
+  color: var(--acid);
+}
+
+.review-video {
+  width: 100%;
+  max-height: 520px;
+  background: #000;
+  border: 1px solid #303832;
+}
+
+.review-line-text {
+  margin: 0;
+  color: #c6cbc3;
+  font-size: 13px;
+  line-height: 1.6;
 }

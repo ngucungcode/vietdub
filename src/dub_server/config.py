@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     api_allowed_hosts: list[str] = Field(
         default_factory=lambda: ["127.0.0.1", "localhost", "::1"]
     )
+    # OpenAI translation key (see docs/openai-translation.md). When None,
+    # a key uploaded from the frontend is stored under jobs_dir by the API.
+    openai_api_key_file: Path | None = None
     api_token_file: Path | None = Path("/run/secrets/api_token")
     sse_poll_seconds: float = Field(default=0.5, ge=0.05, le=10.0)
     acquisition_monitor_seconds: float = Field(default=1.0, ge=0.1, le=30.0)

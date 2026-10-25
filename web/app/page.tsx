@@ -100,6 +100,13 @@ type Job = {
     glossary?: Record<string, string>;
     models?: Record<string, string | null>;
     voice?: { voice_id?: string | null; reference_path?: string | null } | null;
+    translation_backend?: string;
+    translation_model?: string | null;
+    require_final_approval?: boolean;
+    speaker_voices?: Record<string, { voice_id?: string | null; reference_path?: string | null }>;
+    diarize_speakers?: boolean;
+    auto_speaker_voices?: boolean;
+    qc_enabled?: boolean;
   };
   details?: JobDetails;
   error?: JobError | null;
@@ -161,6 +168,11 @@ type StudioView = {
   mix: StudioMix;
   tts_backend: string;
   qc_summary?: StudioQcSummary | null;
+};
+
+type ReviewView = StudioView & {
+  preview_video_url?: string | null;
+  preview_subtitle_url?: string | null;
 };
 
 type StudioCastResponse = (StudioView & { requeued?: boolean }) | { requeued?: boolean };
@@ -292,6 +304,7 @@ const statusLabels: Record<string, string> = {
   muxing: "Đang dựng MP4",
   verifying: "Đang kiểm tra đầu ra",
   completed: "Hoàn tất",
+  awaiting_approval: "Chờ duyệt kết quả",
   paused: "Tạm dừng",
   failed: "Có lỗi",
   cancelling: "Đang hủy",
@@ -415,6 +428,24 @@ function parseGlossary(value: string): Record<string, string> {
   }
   if (Object.keys(glossary).length > 100) throw new Error("Glossary không được vượt quá 100 thuật ngữ.");
   return glossary;
+}
+
+function parseSpeakerVoices(value: string): Record<string, { voice_id: string | null; reference_path: string | null }> {
+  const voices: Record<string, { voice_id: string | null; reference_path: string | null }> = {};
+  for (const [index, rawLine] of value.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const separator = line.indexOf("=");
+    const label = separator >= 0 ? line.slice(0, separator).trim() : "";
+    const target = separator >= 0 ? line.slice(separator + 1).trim() : "";
+    if (!label || !target) throw new Error(`Giọng theo nhân vật dòng ${index + 1} phải có dạng NHÃN=voice_id hoặc NHÃN=đường dẫn file.`);
+    if (label in voices) throw new Error(`Giọng theo nhân vật bị trùng nhãn: ${label}`);
+    const isFile = /\.(wav|mp3|flac|ogg)$/i.test(target) || target.includes("/") || target.includes("\\");
+    voices[label] = isFile
+      ? { voice_id: null, reference_path: target }
+      : { voice_id: target, reference_path: null };
+  }
+  return voices;
 }
 
 function uploadRequestError(xhr: XMLHttpRequest) {
@@ -854,6 +885,24 @@ export default function Home() {
     ducking_threshold: "",
     true_peak_db: "",
   });
+  const [translationBackend, setTranslationBackend] = useState<"local" | "openai">("local");
+  const [openaiModel, setOpenaiModel] = useState("");
+  const [requireFinalApproval, setRequireFinalApproval] = useState(true);
+  const [speakerVoicesText, setSpeakerVoicesText] = useState("");
+  const [diarizeSpeakers, setDiarizeSpeakers] = useState(false);
+  const [autoSpeakerVoices, setAutoSpeakerVoices] = useState(false);
+  const [qcEnabled, setQcEnabled] = useState(true);
+  const [openaiKeyConfigured, setOpenaiKeyConfigured] = useState<boolean | null>(null);
+  const [openaiKeyInput, setOpenaiKeyInput] = useState("");
+  const [settingsBusy, setSettingsBusy] = useState<string | null>(null);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [settingsProblem, setSettingsProblem] = useState<string | null>(null);
+  const [translateKeyMissing, setTranslateKeyMissing] = useState(false);
+  const [review, setReview] = useState<ReviewView | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [reviewBusy, setReviewBusy] = useState<string | null>(null);
+  const [rejectNote, setRejectNote] = useState("");
   const uploadRequestRef = useRef<XMLHttpRequest | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const uploadSessionIdRef = useRef<string | null>(null);
@@ -891,18 +940,28 @@ export default function Home() {
     }
   }, []);
 
+  const refreshOpenAiKey = useCallback(async () => {
+    try {
+      const result = await api<{ configured: boolean }>("/settings/openai-key");
+      setOpenaiKeyConfigured(result.configured);
+    } catch {
+      setOpenaiKeyConfigured(null);
+    }
+  }, []);
+
   useEffect(() => {
     const initial = window.setTimeout(() => {
       void refreshOverview();
       void refreshCatalog();
       void refreshIntegrations();
+      void refreshOpenAiKey();
     }, 0);
     const timer = window.setInterval(() => void refreshOverview(), 3000);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
-  }, [refreshCatalog, refreshIntegrations, refreshOverview]);
+  }, [refreshCatalog, refreshIntegrations, refreshOverview, refreshOpenAiKey]);
 
   useEffect(() => {
     const updateClock = () => setNowMs(Date.now());
@@ -1088,7 +1147,7 @@ export default function Home() {
       setProblem("Bạn cần xác nhận có quyền tải và xử lý nội dung.");
       return;
     }
-    const hasVoiceSelection = Boolean(voiceId.trim() || voiceReferencePath.trim());
+    const hasVoiceSelection = Boolean(voiceId.trim() || voiceReferencePath.trim() || speakerVoicesText.trim());
     if (hasVoiceSelection && !voiceRightsConfirmed) {
       setProblem("Bạn cần xác nhận có quyền sử dụng giọng tham chiếu.");
       return;
@@ -1103,7 +1162,7 @@ export default function Home() {
     let createdUploadId: string | null = null;
     const models = {
       asr: selectedModels.asr || null,
-      translation: selectedModels.mt || null,
+      translation: translationBackend === "openai" ? null : (selectedModels.mt || null),
       separation: selectedModels.separation || null,
       tts: selectedModels.tts || null,
     };
@@ -1115,6 +1174,7 @@ export default function Home() {
       : null;
     try {
       const glossary = parseGlossary(glossaryText);
+      const speakerVoices = parseSpeakerVoices(speakerVoicesText);
         const overallTotal = mediaFile.size + (subtitleFile?.size ?? 0);
         const retainedUploadId = uploadSessionIdRef.current;
         createdUploadId = retainedUploadId;
@@ -1136,6 +1196,13 @@ export default function Home() {
             voice,
             voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
             glossary,
+            translation_backend: translationBackend,
+            translation_model: translationBackend === "openai" ? (openaiModel.trim() || null) : null,
+            require_final_approval: requireFinalApproval,
+            speaker_voices: speakerVoices,
+            diarize_speakers: diarizeSpeakers,
+            auto_speaker_voices: autoSpeakerVoices,
+            qc_enabled: qcEnabled,
         };
         const uploadRequestFingerprint = JSON.stringify({
           rights_confirmed: uploadRequest.rights_confirmed,
@@ -1145,6 +1212,13 @@ export default function Home() {
           voice: uploadRequest.voice,
           voice_rights_confirmed: uploadRequest.voice_rights_confirmed,
           glossary: uploadRequest.glossary,
+          translation_backend: uploadRequest.translation_backend,
+          translation_model: uploadRequest.translation_model,
+          require_final_approval: uploadRequest.require_final_approval,
+          speaker_voices: uploadRequest.speaker_voices,
+          diarize_speakers: uploadRequest.diarize_speakers,
+          auto_speaker_voices: uploadRequest.auto_speaker_voices,
+          qc_enabled: uploadRequest.qc_enabled,
           subtitle_declared: Boolean(uploadRequest.subtitle_filename),
         });
         let session: UploadSession | null = null;
@@ -1398,8 +1472,31 @@ export default function Home() {
     }
     setStudio(null);
     setStudioNotice(null);
+    setTranslateKeyMissing(false);
     void refreshStudio(studioJobId);
   }, [studioJobId, refreshStudio]);
+
+  const refreshReview = useCallback(async (jobId: string) => {
+    setReviewError(null);
+    try {
+      const view = await api<ReviewView>(`/jobs/${encodeURIComponent(jobId)}/review`);
+      setReview(view);
+    } catch (error) {
+      setReview(null);
+      setReviewError(messageOf(error, "Không thể tải bản duyệt."));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedJob?.status === "awaiting_approval") {
+      setRejectNote("");
+      void refreshReview(selectedJob.id);
+    } else {
+      setReview(null);
+      setReviewError(null);
+      setReviewNotice(null);
+    }
+  }, [selectedJob?.id, selectedJob?.status, refreshReview]);
 
   async function saveStudioCast(jobId: string) {
     if (!studio) return;
@@ -1609,6 +1706,106 @@ export default function Home() {
     }
   }
 
+  async function saveOpenAiKey(event: FormEvent) {
+    event.preventDefault();
+    if (!openaiKeyInput.trim()) {
+      setSettingsProblem("Hãy nhập key OpenAI trước khi lưu.");
+      return;
+    }
+    setSettingsBusy("openai-key");
+    setSettingsProblem(null);
+    setSettingsNotice(null);
+    try {
+      await api<{ configured: boolean }>("/settings/openai-key", {
+        method: "PUT",
+        body: JSON.stringify({ key: openaiKeyInput.trim() }),
+      });
+      setOpenaiKeyInput("");
+      setSettingsNotice("Đã lưu key OpenAI phía máy chủ. Key không bao giờ hiển thị lại trên dashboard.");
+      await refreshOpenAiKey();
+    } catch (error) {
+      setSettingsProblem(messageOf(error, "Không thể lưu key OpenAI."));
+    } finally {
+      setSettingsBusy(null);
+    }
+  }
+
+  async function removeOpenAiKey() {
+    if (!window.confirm("Xóa key OpenAI đã lưu trên máy chủ? Job dịch API sau đó sẽ báo thiếu key.")) return;
+    setSettingsBusy("openai-key-delete");
+    setSettingsProblem(null);
+    setSettingsNotice(null);
+    try {
+      await api<{ configured: boolean }>("/settings/openai-key", { method: "DELETE" });
+      setSettingsNotice("Đã xóa key OpenAI.");
+      await refreshOpenAiKey();
+    } catch (error) {
+      setSettingsProblem(messageOf(error, "Không thể xóa key OpenAI."));
+    } finally {
+      setSettingsBusy(null);
+    }
+  }
+
+  async function translateWithApi(job: Job) {
+    const key = `${job.id}:translate`;
+    setBusyAction(key);
+    setTranslateKeyMissing(false);
+    setProblem(null);
+    try {
+      const result = await api<{ job_id: string; status: string; model?: string }>(
+        `/jobs/${encodeURIComponent(job.id)}/translate-openai`,
+        { method: "POST" },
+      );
+      setNotice(
+        `Đã gửi yêu cầu dịch bằng API${result.model ? ` (model ${result.model})` : ""}. Trang tự cập nhật; khi dịch xong job chuyển sang tạo giọng.`,
+      );
+      await refreshOverview();
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.code === "openai_api_key_missing") {
+        setTranslateKeyMissing(true);
+      } else {
+        setProblem(messageOf(error, "Không thể bắt đầu dịch bằng API."));
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function approveReview(jobId: string) {
+    setReviewBusy("approve");
+    setReviewError(null);
+    setReviewNotice(null);
+    try {
+      await api<Job>(`/jobs/${encodeURIComponent(jobId)}/review/approve`, { method: "POST" });
+      setReviewNotice("Đã duyệt. Job chuyển sang hoàn tất; file xuất hiện ở mục tải kết quả bên dưới.");
+      await refreshOverview();
+    } catch (error) {
+      setReviewError(messageOf(error, "Không thể duyệt kết quả."));
+    } finally {
+      setReviewBusy(null);
+    }
+  }
+
+  async function rejectReview(jobId: string) {
+    setReviewBusy("reject");
+    setReviewError(null);
+    setReviewNotice(null);
+    try {
+      const note = rejectNote.trim();
+      await api<Job>(`/jobs/${encodeURIComponent(jobId)}/review/reject`, {
+        method: "POST",
+        body: JSON.stringify(note ? { note } : {}),
+      });
+      setReviewNotice("Đã gửi yêu cầu sửa. Job quay lại Studio để bạn sửa rồi dựng lại.");
+      await refreshOverview();
+      await refreshStudio(jobId);
+    } catch (error) {
+      setReviewError(messageOf(error, "Không thể gửi yêu cầu sửa."));
+    } finally {
+      setReviewBusy(null);
+    }
+  }
+
   const cpuMode = health?.compute_mode === "cpu";
   const gpuDevices = health?.gpu?.gpus ?? [];
   const gpuWarnings = (cpuMode ? [] : health?.gpu?.warnings ?? [])
@@ -1671,6 +1868,7 @@ export default function Home() {
         </a>
         <nav className="topnav" aria-label="Điều hướng dashboard">
           <a href="#workflow">Workflow</a>
+          <a href="#settings">Cài đặt</a>
           <a href="#jobs">Job</a>
           <a href="#models">Model</a>
           <a href="#integrations">Tích hợp</a>
@@ -1683,6 +1881,7 @@ export default function Home() {
 
       <nav className="mobile-nav" aria-label="Điều hướng nhanh">
         <a href="#workflow">Tải video</a>
+        <a href="#settings">Cài đặt</a>
         <a href="#jobs">Job</a>
         <a href="#models">Model</a>
         <a href="#integrations">Phụ đề</a>
@@ -1729,7 +1928,7 @@ export default function Home() {
                 Mức hỗ trợ: {gpuSupportTier ? gpuSupportTierLabel[gpuSupportTier] : "Không xác định"}
               </span>
             )}
-            <span className="ok">AI đám mây tắt theo thiết kế</span>
+            <span className="ok">AI đám mây tắt theo thiết kế (trừ bước dịch API nếu bạn bật)</span>
           </div>
           {validModelCount < catalog.models.length && (
             <a className="machine-action" href="#models">Thiết lập model</a>
@@ -1895,7 +2094,7 @@ export default function Home() {
                     <span>{label}</span>
                     <select
                       value={selectedModels[stage] ?? ""}
-                      disabled={submitting || uploadConfigurationLocked}
+                      disabled={submitting || uploadConfigurationLocked || (stage === "mt" && translationBackend === "openai")}
                       onChange={(event) =>
                         setSelectedModels((current) => ({ ...current, [stage]: event.target.value }))
                       }
@@ -1910,6 +2109,50 @@ export default function Home() {
                   </label>
                 ))}
               </div>
+              <div className="voice-grid">
+                <label className="field">
+                  <span>Backend dịch</span>
+                  <select
+                    value={translationBackend}
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={(event) =>
+                      setTranslationBackend(event.target.value === "openai" ? "openai" : "local")
+                    }
+                  >
+                    <option value="local">Cục bộ (Gemma trên máy)</option>
+                    <option value="openai">API OpenAI</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Model API (khi chọn OpenAI)</span>
+                  <input
+                    value={openaiModel}
+                    disabled={translationBackend !== "openai" || submitting || uploadConfigurationLocked}
+                    onChange={(event) => setOpenaiModel(event.target.value)}
+                    placeholder="gpt-4o-mini (để trống = mặc định)"
+                  />
+                </label>
+              </div>
+              {translationBackend === "openai" && (
+                <p className="helper-copy">
+                  Dịch bằng API gửi lời thoại lên OpenAI; model dịch cục bộ ở trên không dùng cho job này.
+                  {openaiKeyConfigured === false
+                    ? " Chưa có key OpenAI — mở Cài đặt để nhập key trước khi tạo job."
+                    : openaiKeyConfigured
+                      ? " Key OpenAI đã cấu hình trên máy chủ."
+                      : " Trạng thái key chưa rõ — kiểm tra ở mục Cài đặt."}{" "}
+                  <a href="#settings">Mở Cài đặt</a>
+                </p>
+              )}
+              <label className="rights-check">
+                <input
+                  type="checkbox"
+                  checked={requireFinalApproval}
+                  disabled={submitting || uploadConfigurationLocked}
+                  onChange={(event) => setRequireFinalApproval(event.target.checked)}
+                />
+                <span>Dừng lại để mình duyệt kết quả trước khi xuất file cuối (job sẽ chờ ở trạng thái “Chờ duyệt kết quả”).</span>
+              </label>
               <div className="voice-grid">
                 <label className="field">
                   <span>Voice ID (tùy chọn)</span>
@@ -1941,7 +2184,45 @@ export default function Home() {
                 />
                 <small>Mỗi dòng: thuật ngữ nguồn = cách dịch tiếng Việt. Tối đa 100 mục.</small>
               </label>
-              {(voiceId || voiceReferencePath) && (
+              <label className="field">
+                <span>Giọng theo nhân vật (tùy chọn)</span>
+                <textarea
+                  value={speakerVoicesText}
+                  disabled={submitting || uploadConfigurationLocked}
+                  onChange={(event) => setSpeakerVoicesText(event.target.value)}
+                  placeholder={"ANNA=3\nNAM=/workspace/voices/nam.wav"}
+                  rows={3}
+                />
+                <small>Mỗi dòng: NHÃN=voice_id hoặc đường dẫn file giọng mẫu. Nhãn khớp tên nhân vật trong SRT hoặc diarization (VD: SPEAKER_00).</small>
+              </label>
+              <label className="rights-check">
+                <input
+                  type="checkbox"
+                  checked={diarizeSpeakers}
+                  disabled={submitting || uploadConfigurationLocked}
+                  onChange={(event) => setDiarizeSpeakers(event.target.checked)}
+                />
+                <span>Tự tách nhân vật bằng diarization (cần pipeline pyannote đã cài trên máy xử lý).</span>
+              </label>
+              <label className="rights-check">
+                <input
+                  type="checkbox"
+                  checked={autoSpeakerVoices}
+                  disabled={submitting || uploadConfigurationLocked}
+                  onChange={(event) => setAutoSpeakerVoices(event.target.checked)}
+                />
+                <span>Tự gán giọng Piper theo thứ tự nhân vật (chỉ áp dụng cho backend Piper).</span>
+              </label>
+              <label className="rights-check">
+                <input
+                  type="checkbox"
+                  checked={qcEnabled}
+                  disabled={submitting || uploadConfigurationLocked}
+                  onChange={(event) => setQcEnabled(event.target.checked)}
+                />
+                <span>Cho AI nghe lại sau khi dựng xong và gắn cờ câu lệch kịch bản.</span>
+              </label>
+              {(voiceId || voiceReferencePath || speakerVoicesText.trim()) && (
                 <label className="rights-check voice-rights">
                   <input
                     type="checkbox"
@@ -2153,6 +2434,93 @@ export default function Home() {
             </div>
           )}
         </aside>
+      </section>
+
+      <section className="panel detail-panel" id="settings">
+        <div className="panel-heading">
+          <div>
+            <h2>Cài đặt</h2>
+          </div>
+          <span className={`status-chip ${openaiKeyConfigured ? "online" : "offline"}`}>
+            {openaiKeyConfigured
+              ? "Key OpenAI đã cấu hình"
+              : openaiKeyConfigured === false
+                ? "Chưa có key OpenAI"
+                : "Chưa rõ trạng thái key"}
+          </span>
+        </div>
+        <p className="section-intro">
+          Key OpenAI chỉ lưu phía máy chủ và không bao giờ hiển thị lại trên dashboard.
+          Backend dịch và model API dưới đây là mặc định cho job mới tạo sau đó; bạn vẫn đổi được từng job trong form tạo job.
+        </p>
+        {(settingsProblem || settingsNotice) && (
+          <div className={`notice ${settingsProblem ? "error" : "success"}`} role="status">
+            {settingsProblem ?? settingsNotice}
+          </div>
+        )}
+        <form className="admin-form" onSubmit={saveOpenAiKey}>
+          <label className="field">
+            <span>Key OpenAI</span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={openaiKeyInput}
+              onChange={(event) => setOpenaiKeyInput(event.target.value)}
+              placeholder={openaiKeyConfigured ? "Đã lưu — nhập key mới để thay" : "sk-..."}
+            />
+          </label>
+          <div className="integration-actions">
+            <button
+              className="primary"
+              disabled={settingsBusy === "openai-key" || !openaiKeyInput.trim()}
+            >
+              {settingsBusy === "openai-key" ? "Đang lưu…" : "Lưu key"}
+            </button>
+            {openaiKeyConfigured && (
+              <button
+                className="small-button danger"
+                type="button"
+                disabled={settingsBusy === "openai-key-delete"}
+                onClick={() => void removeOpenAiKey()}
+              >
+                Xóa key
+              </button>
+            )}
+            <button
+              className="small-button"
+              type="button"
+              onClick={() => void refreshOpenAiKey()}
+            >
+              Kiểm tra lại
+            </button>
+          </div>
+        </form>
+        <div className="settings-grid settings-defaults">
+          <label className="field">
+            <span>Backend dịch mặc định cho job mới</span>
+            <select
+              value={translationBackend}
+              onChange={(event) =>
+                setTranslationBackend(event.target.value === "openai" ? "openai" : "local")
+              }
+            >
+              <option value="local">Cục bộ (Gemma trên máy)</option>
+              <option value="openai">API OpenAI</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Model API mặc định</span>
+            <input
+              value={openaiModel}
+              disabled={translationBackend !== "openai"}
+              onChange={(event) => setOpenaiModel(event.target.value)}
+              placeholder="gpt-4o-mini (để trống = mặc định)"
+            />
+          </label>
+        </div>
+        <p className="helper-copy">
+          Khi chọn API OpenAI, lời thoại được gửi lên OpenAI để dịch; tiến trình dịch chạy ngoài worker offline và job sẽ hiện trạng thái “Đang dịch” cho tới khi xong.
+        </p>
       </section>
 
       {selectedJob && (
@@ -2428,6 +2796,41 @@ export default function Home() {
               </button>
             )}
           </div>
+
+          {selectedJob.status === "ready_translation" && selectedJob.spec?.translation_backend === "openai" && (
+            <div className="action-panel">
+              <div>
+                <span className="action-kicker">DỊCH BẰNG API</span>
+                <h3>Dịch lời thoại qua OpenAI</h3>
+                <p>
+                  Job này đã cấu hình dịch bằng API
+                  {selectedJob.spec?.models?.translation ? ` (model ${selectedJob.spec.models.translation})` : ""}
+                  . Bấm để bắt đầu dịch; worker offline không tự gọi API nên bước này chạy qua tiến trình dịch riêng.
+                </p>
+              </div>
+              {translateKeyMissing && (
+                <div className="notice error" role="status">
+                  Chưa có key OpenAI trên máy chủ. <a href="#settings">Mở Cài đặt để nhập key</a> rồi thử lại.
+                </div>
+              )}
+              <div className="detail-actions">
+                <button
+                  className="small-button download"
+                  type="button"
+                  disabled={busyAction === `${selectedJob.id}:translate`}
+                  onClick={() => void translateWithApi(selectedJob)}
+                >
+                  {busyAction === `${selectedJob.id}:translate` ? "Đang gửi…" : "Dịch bằng API"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {selectedJob.status === "translating" && (
+            <div className="notice" role="status">
+              Đang dịch bằng API — trang tự cập nhật; khi dịch xong job chuyển sang “Sẵn sàng tạo giọng” và Phase 4 chạy tiếp tự động.
+            </div>
+          )}
 
           {selectedJob.status === "completed" && (
             <div className="artifact-panel">
@@ -2719,6 +3122,113 @@ export default function Home() {
                   onClick={() => void saveStudioMix(selectedJob.id)}
                 >
                   {studioBusy === "mix" ? "Đang lưu…" : "Lưu mix"}
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {selectedJob && selectedJob.status === "awaiting_approval" && (
+        <section className="panel detail-panel" aria-labelledby="review-title">
+          <div className="panel-heading">
+            <div>
+              <h2 id="review-title">Duyệt kết quả</h2>
+            </div>
+            <button
+              className="small-button"
+              type="button"
+              onClick={() => void refreshReview(selectedJob.id)}
+            >
+              Tải lại bản duyệt
+            </button>
+          </div>
+          <p className="section-intro">
+            Xem video đã dựng xong trước khi xuất file cuối. Bấm “Duyệt và xuất file” để chốt, hoặc “Cần sửa” để job quay lại Studio sửa rồi dựng lại.
+          </p>
+          {reviewError && (
+            <div className="notice error" role="status">{reviewError}</div>
+          )}
+          {reviewNotice && (
+            <div className="notice" role="status">{reviewNotice}</div>
+          )}
+          {!review && !reviewError && <p className="helper-copy">Đang tải bản duyệt…</p>}
+          {review && (
+            <>
+              <video
+                className="review-video"
+                controls
+                src={review.preview_video_url || `/v1/jobs/${encodeURIComponent(selectedJob.id)}/review/video`}
+              />
+              <div className="detail-actions">
+                <a
+                  className="small-button download"
+                  href={review.preview_subtitle_url || `/v1/jobs/${encodeURIComponent(selectedJob.id)}/review/subtitle`}
+                >
+                  Tải phụ đề duyệt
+                </a>
+              </div>
+              {review.qc_summary && (
+                <p className="helper-copy">
+                  AI nghe lại: {review.qc_summary.ok ?? 0}/{review.qc_summary.total ?? 0} câu khớp kịch bản
+                  {review.qc_summary.needs_attention
+                    ? `, ${review.qc_summary.needs_attention} câu cần chú ý (sai nhiều: ${review.qc_summary.bad ?? 0}, không nghe thấy: ${review.qc_summary.silent ?? 0}, nên nghe lại: ${review.qc_summary.review ?? 0}).`
+                    : ". Mọi câu đều khớp."}
+                </p>
+              )}
+              <div className="studio-script">
+                {review.script.map((line) => (
+                  <article key={line.ordinal} className="studio-line">
+                    <div className="studio-line-meta">
+                      <strong>Câu {line.ordinal + 1}</strong>
+                      <span>{formatMmSs(line.start_us)}</span>
+                      <span>{line.display_name || line.speaker || "Không rõ nhân vật"}</span>
+                      {line.qc_status && line.qc_status !== "ok" && (
+                        <small>
+                          AI nghe: {line.qc_status === "silent"
+                            ? "không nghe thấy gì"
+                            : line.qc_status === "bad"
+                              ? "sai nhiều, cần thu lại"
+                              : line.qc_status === "review"
+                                ? "nên nghe lại"
+                                : "lệch nhẹ"}
+                          {line.qc_wer != null && ` (WER ${(line.qc_wer * 100).toFixed(0)}%)`}
+                          {line.qc_heard ? ` — nghe ra: “${line.qc_heard}”` : ""}
+                        </small>
+                      )}
+                    </div>
+                    <p className="review-line-text">{line.text}</p>
+                  </article>
+                ))}
+                {review.script.length === 0 && (
+                  <p className="helper-copy">Bản duyệt chưa có câu thoại nào.</p>
+                )}
+              </div>
+              <label className="field">
+                <span>Ghi chú cần sửa (tùy chọn, chỉ dùng khi bấm “Cần sửa”)</span>
+                <textarea
+                  rows={2}
+                  value={rejectNote}
+                  onChange={(event) => setRejectNote(event.target.value)}
+                  placeholder="VD: Câu 5 sai tên nhân vật, câu 12 ngắt nhịp sớm"
+                />
+              </label>
+              <div className="detail-actions">
+                <button
+                  className="small-button download"
+                  type="button"
+                  disabled={reviewBusy !== null}
+                  onClick={() => void approveReview(selectedJob.id)}
+                >
+                  {reviewBusy === "approve" ? "Đang duyệt…" : "Duyệt và xuất file"}
+                </button>
+                <button
+                  className="small-button danger"
+                  type="button"
+                  disabled={reviewBusy !== null}
+                  onClick={() => void rejectReview(selectedJob.id)}
+                >
+                  {reviewBusy === "reject" ? "Đang gửi…" : "Cần sửa"}
                 </button>
               </div>
             </>

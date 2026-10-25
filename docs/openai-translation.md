@@ -19,7 +19,7 @@ Chỉ text của từng block dịch + glossary + 1 block tiếng Việt trướ
 (làm context giữ tên riêng) được gửi đi. Không gửi tên file, không gửi
 audio, không gửi toàn bộ kịch bản trong 1 request.
 
-## Code đã thêm (chưa push, chỉ ở working tree local)
+## Code đã thêm
 
 - `src/dub_server/openai_translation.py` — `OpenAITranslator`
   implements đúng `Translator` protocol trong `translation.py`:
@@ -112,3 +112,47 @@ hiểu rõ và chấp nhận rủi ro đó.
   (stage sẽ fail job với code, không ghi bản dịch rỗng).
 - Chưa test với key thật và chưa chạy end-to-end qua worker, vì cần
   key của bạn và một job ở trạng thái `READY_TRANSLATION`.
+
+## Cấu hình qua frontend (không cần sửa file hay biến môi trường)
+
+Upload mới nhận thêm 3 trường (đi thẳng vào job spec):
+
+- `translation_backend`: `"local"` (mặc định, Gemma local) hoặc
+  `"openai"`.
+- `translation_model`: tên model OpenAI, ví dụ `gpt-4o-mini`
+  (mặc định khi để trống). Lúc finalize, backend chuẩn hóa
+  `spec["models"]["translation"]` thành `mt-openai-<model>` để
+  stage, worker và runner đều đồng ý một model id.
+- `require_final_approval`: xem vòng duyệt cuối trong
+  `docs/studio.md`.
+
+Luồng chạy của job `openai`:
+
+1. Worker phiên dịch **bỏ qua** job này: `process_next_translation_job`
+   nhận thêm lọc `translation_backend`, worker chính truyền `"local"`
+   nên job `openai` nằm yên ở `READY_TRANSLATION` (nó mà nhận thì
+   guard chặn mạng, dịch lỗi).
+2. Frontend bấm `POST /v1/jobs/{job_id}/translate-openai` → 202, API
+   (tiến trình không bị guard) chạy `TranslationStage` với
+   `OpenAITranslator` trong background task. Job sang `READY_TTS`
+   thì worker tự chạy tiếp Phase 4. Job `TRANSLATING` dở dang do
+   API restart thì bấm lại để resume; job đang chạy rồi thì API
+   trả 409 `translation_in_progress`.
+3. Script CLI vẫn dùng được, và giờ cũng chỉ nhận job `openai`
+   (`translation_backend="openai"`), không còn ôm cả job local như
+   trước.
+
+Key nhập qua UI, không qua biến môi trường:
+
+- `GET /v1/settings/openai-key` → chỉ trả `{"configured": bool}`,
+  không bao giờ trả key.
+- `PUT /v1/settings/openai-key` với `{"key": "..."}` → lưu file
+  0600. Vị trí: `DUB_OPENAI_API_KEY_FILE` nếu đặt, nếu không thì
+  `<jobs_dir>/.openai_api_key` (server-side, không được serve).
+- `DELETE /v1/settings/openai-key` → xóa file key.
+- Thứ tự đọc key của runner/API: file đã lưu ở trên →
+  `/run/secrets/openai_api_key` → biến môi trường `OPENAI_API_KEY`.
+  Key không nằm trong job spec, log hay artifact (giữ nguyên luật
+  cũ).
+
+UI mới xem thêm `docs/frontend-config.md`.

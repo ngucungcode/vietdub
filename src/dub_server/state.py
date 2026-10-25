@@ -41,6 +41,7 @@ class JobStatus(StrEnum):
     MIXING = "mixing"
     MUXING = "muxing"
     VERIFYING = "verifying"
+    AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     PAUSED = "paused"
     FAILED = "failed"
@@ -88,6 +89,7 @@ ACTIVE_JOB_STATUSES = (
     JobStatus.MIXING,
     JobStatus.MUXING,
     JobStatus.VERIFYING,
+    JobStatus.AWAITING_APPROVAL,
     JobStatus.NEEDS_LANGUAGE,
     JobStatus.NEEDS_SUBTITLE_SELECTION,
     JobStatus.CANCELLING,
@@ -231,7 +233,20 @@ _TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     ),
     JobStatus.VERIFYING: frozenset(
         {
+            JobStatus.AWAITING_APPROVAL,
             JobStatus.COMPLETED,
+            JobStatus.PAUSED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }
+    ),
+    # Final-review gate (see docs/studio.md): the muxed preview exists but
+    # the job is not released until the user approves it. Rejecting sends
+    # the job back to the studio queue (READY_TTS) for fixes.
+    JobStatus.AWAITING_APPROVAL: frozenset(
+        {
+            JobStatus.COMPLETED,
+            JobStatus.READY_TTS,
             JobStatus.PAUSED,
             JobStatus.FAILED,
             JobStatus.CANCELLED,

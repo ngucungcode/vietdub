@@ -327,13 +327,30 @@ async def process_next_translation_job(
     shutdown: threading.Event,
     settings: Settings | None = None,
     gpu_report: GpuPreflightReport | None = None,
+    translation_backend: str | None = None,
 ) -> bool:
-    """Process at most one ready/resumable translation job."""
+    """Process at most one ready/resumable translation job.
+
+    ``translation_backend`` routes jobs by their spec: the offline worker
+    passes ``"local"`` (it must never claim an OpenAI job, whose API call
+    its network guard would block), while the standalone OpenAI runner
+    passes ``"openai"``. ``None`` keeps the old unfiltered behaviour.
+    """
 
     records = store.list_jobs(_TRANSLATION_QUEUE, limit=100)
     if not records or shutdown.is_set():
         return False
-    record = records[0]
+    record = None
+    for candidate in records:
+        backend = candidate.spec.get("translation_backend") or "local"
+        if translation_backend == "local" and backend == "openai":
+            continue
+        if translation_backend == "openai" and backend != "openai":
+            continue
+        record = candidate
+        break
+    if record is None:
+        return False
     if not _ensure_selected_models_fit_vram(
         store,
         record,
@@ -466,6 +483,7 @@ async def _worker_loop(
                     shutdown=shutdown,
                     settings=settings,
                     gpu_report=report,
+                    translation_backend="local",
                 )
             if not worked:
                 worked = await process_next_phase4_job(

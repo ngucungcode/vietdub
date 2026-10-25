@@ -3530,6 +3530,22 @@ class Phase4Stage:
             "output_path": result["video_path"],
             "output_sha256": result["video_sha256"],
         }
+        if current.spec.get("require_final_approval") is True:
+            # Final-review gate (see docs/studio.md): the muxed video
+            # and SRT are ready, but the job is only released as
+            # COMPLETED — and its artifacts only become downloadable —
+            # after the user approves it in the review screen. The
+            # sealed result is stored now, so approval is just a
+            # status flip; rejection sends the job back to READY_TTS.
+            return self._store.update_status(
+                job_id,
+                JobStatus.AWAITING_APPROVAL,
+                expected_status=JobStatus.VERIFYING,
+                stage=JobStage.VERIFY,
+                progress_permille=990,
+                details={**details, "phase4_step": "awaiting_approval"},
+                result=result,
+            )
         return self._store.update_status(
             job_id,
             JobStatus.COMPLETED,

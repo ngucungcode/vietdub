@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import stat as stat_module
@@ -22,7 +23,16 @@ from urllib.parse import urlsplit
 from weakref import WeakValueDictionary
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
@@ -69,6 +79,7 @@ from .gpu import (
     read_gpu_report,
 )
 from .media_probe import FfprobeMediaProbe, MediaProbe, MediaProbeError
+from .openai_translation import OpenAITranslator, read_openai_api_key
 from .opensubtitles import (
     DEFAULT_OPENSUBTITLES_API_ROOT,
     normalize_opensubtitles_api_root,
@@ -102,6 +113,7 @@ from .translation_artifact import (
     TranslationArtifactError,
     load_translation_artifact,
 )
+from .translation_stage import TranslationStage
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS = frozenset(
@@ -332,6 +344,21 @@ class UploadCreateRequest(BaseModel):
     # AI listen-back after Phase 4 (see docs/studio.md). Best-effort:
     # when False the job skips it entirely.
     qc_enabled: bool = True
+    # Translation backend (see docs/openai-translation.md). "local" uses
+    # the on-device Gemma model; "openai" leaves the job at
+    # READY_TRANSLATION for the API process (endpoint
+    # POST /v1/jobs/{id}/translate-openai, or the standalone
+    # scripts/translate-openai.py) because the offline worker cannot
+    # reach the network. Stored verbatim into the job spec.
+    translation_backend: Literal["local", "openai"] = "local"
+    # OpenAI model id for the openai backend (default gpt-4o-mini).
+    # Ignored for local jobs. At finalize time the backend normalizes
+    # spec["models"]["translation"] to "mt-openai-<model>".
+    translation_model: str | None = Field(default=None, max_length=200)
+    # Final-review gate (see docs/studio.md): when True, Phase 4 stops
+    # at AWAITING_APPROVAL with a preview instead of COMPLETED, and the
+    # finished file is only released after POST .../review/approve.
+    require_final_approval: bool = False
     glossary: Glossary = Field(default_factory=dict)
 
 
@@ -1298,6 +1325,47 @@ def _studio_requeue(store: StateStore, record: JobRecord) -> bool:
         )
         return True
     return False
+
+
+def _openai_key_path(settings: Settings) -> Path:
+    """Where the API keeps an OpenAI key uploaded from the frontend.
+
+    An explicit DUB_OPENAI_API_KEY_FILE wins; otherwise a 0600 file
+    under jobs_dir. Server-side only: never served, never returned by
+    any endpoint (only its configured/not-configured state is).
+    """
+
+    if settings.openai_api_key_file is not None:
+        return Path(settings.openai_api_key_file)
+    return settings.jobs_dir / ".openai_api_key"
+
+
+def _openai_key_configured(settings: Settings) -> bool:
+    try:
+        return bool(_openai_key_path(settings).read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
+
+
+# Job ids with an OpenAI translation run active inside this API process
+# (background task of POST /v1/jobs/{id}/translate-openai). Guards
+# against double-running one job; a stale TRANSLATING job left behind
+# by an API restart is not in this set, so it can be resumed.
+_OPENAI_TRANSLATION_RUNNING: set[str] = set()
+
+
+class OpenAiKeyRequest(BaseModel):
+    """Write-only OpenAI key upload. The key is never returned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=1000)
+
+
+class ReviewRejectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=500)
 
 
 def _studio_drop_tts_blocks(
@@ -2450,6 +2518,28 @@ def create_app(
                     ),
                 }
             )
+            # Normalize the OpenAI translation choice so the translation
+            # stage, the worker filter and the API runner all agree on
+            # one model id (mirrors scripts/translate-openai.py).
+            if spec.get("translation_backend") == "openai":
+                raw_model = spec.get("translation_model")
+                model = raw_model.strip() if isinstance(raw_model, str) else ""
+                if not model:
+                    model = "gpt-4o-mini"
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model):
+                    raise _upload_error(
+                        status.HTTP_400_BAD_REQUEST,
+                        "translation_model_invalid",
+                        "Tên model OpenAI không hợp lệ",
+                    )
+                models = spec.get("models")
+                if not isinstance(models, dict):
+                    models = {}
+                    spec["models"] = models
+                models["translation"] = f"mt-openai-{model}"
+                spec["translation_model"] = model
+            else:
+                spec["translation_model"] = None
             acquisition_checkpoint = {
                 "source": "local_upload",
                 "selected_media": selected_media,
@@ -3010,6 +3100,307 @@ def create_app(
                     "retryable": False,
                 },
             ) from exc
+
+    @application.get("/v1/settings/openai-key")
+    def get_openai_key_status() -> dict[str, Any]:
+        """Report only whether an OpenAI key is stored, never the key."""
+
+        return {"configured": _openai_key_configured(configured_settings)}
+
+    @application.put("/v1/settings/openai-key")
+    def put_openai_key(body: OpenAiKeyRequest) -> dict[str, Any]:
+        """Store an OpenAI key server-side (0600 file). Write-only."""
+
+        key = body.key.strip()
+        if not key or any(character.isspace() for character in key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "openai_api_key_invalid",
+                    "message": "API key OpenAI không hợp lệ",
+                    "retryable": False,
+                },
+            )
+        path = _openai_key_path(configured_settings)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(path, key.encode("utf-8"))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                detail={
+                    "code": "openai_api_key_store_failed",
+                    "message": "Không lưu được API key OpenAI",
+                    "retryable": True,
+                },
+            ) from exc
+        return {"configured": True}
+
+    @application.delete("/v1/settings/openai-key")
+    def delete_openai_key() -> dict[str, Any]:
+        _openai_key_path(configured_settings).unlink(missing_ok=True)
+        return {"configured": False}
+
+    @application.post(
+        "/v1/jobs/{job_id}/translate-openai",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def translate_job_openai(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        store: StoreDependency,
+    ) -> dict[str, Any]:
+        """Translate an openai-backend job via the API, outside the worker.
+
+        The offline worker never claims these jobs (see worker.py), so
+        the API process — which has no network guard — runs the
+        translation in the background. The job then continues through
+        Phase 4 on its own. A stale TRANSLATING job (API restarted
+        mid-run) can be resumed here; a live run cannot be doubled.
+        """
+
+        try:
+            record = store.get_job(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        if record.status not in {
+            JobStatus.READY_TRANSLATION,
+            JobStatus.TRANSLATING,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "translation_not_ready",
+                    "message": "Job không ở trạng thái chờ dịch",
+                    "retryable": True,
+                },
+            )
+        if (record.spec.get("translation_backend") or "local") != "openai":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "translation_backend_not_openai",
+                    "message": "Job này dùng backend dịch local, không dịch qua API",
+                    "retryable": False,
+                },
+            )
+        if job_id in _OPENAI_TRANSLATION_RUNNING:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "translation_in_progress",
+                    "message": "Job đang được dịch qua API, vui lòng chờ",
+                    "retryable": True,
+                },
+            )
+        model = record.spec.get("translation_model")
+        model = model.strip() if isinstance(model, str) and model.strip() else "gpt-4o-mini"
+        key_path = _openai_key_path(configured_settings)
+        try:
+            api_key = read_openai_api_key(key_path if key_path.is_file() else None)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "openai_api_key_missing",
+                    "message": (
+                        "Chưa có API key OpenAI: nhập key ở phần Cài đặt "
+                        "trước khi dịch qua API"
+                    ),
+                    "retryable": False,
+                },
+            ) from exc
+
+        _OPENAI_TRANSLATION_RUNNING.add(job_id)
+
+        async def _run_translation() -> None:
+            try:
+                translator = OpenAITranslator(api_key=api_key, model=model)
+                try:
+                    stage = TranslationStage(
+                        models_lock_path=configured_settings.models_lock_path,
+                        models_dir=configured_settings.models_dir,
+                        jobs_dir=configured_settings.jobs_dir,
+                        default_translation_model_id=f"mt-openai-{model}",
+                        store=store,
+                        openai_translator=translator,
+                    )
+                    await stage.run(job_id)
+                finally:
+                    translator.close()
+            finally:
+                _OPENAI_TRANSLATION_RUNNING.discard(job_id)
+
+        background_tasks.add_task(_run_translation)
+        return {"job_id": job_id, "status": "translating", "model": model}
+
+    @application.get("/v1/jobs/{job_id}/review")
+    def get_review(job_id: str, store: StoreDependency) -> dict[str, Any]:
+        """Review screen data for a job awaiting final approval."""
+
+        try:
+            record = store.get_job(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        if record.status is not JobStatus.AWAITING_APPROVAL:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "review_not_ready",
+                    "message": "Job chưa tới bước duyệt kết quả cuối",
+                    "retryable": True,
+                },
+            )
+        view = _studio_view(store, configured_settings, record)
+        view["preview_video_url"] = f"/v1/jobs/{job_id}/review/video"
+        view["preview_subtitle_url"] = f"/v1/jobs/{job_id}/review/subtitle"
+        return view
+
+    def _review_file(
+        job_id: str, store: StateStore, kind: Literal["video", "subtitle"]
+    ) -> FileResponse:
+        try:
+            record = store.get_job(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        if record.status is not JobStatus.AWAITING_APPROVAL:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "review_not_ready",
+                    "message": "Job chưa tới bước duyệt kết quả cuối",
+                    "retryable": True,
+                },
+            )
+        output_root = configured_settings.output_dir.resolve(strict=False)
+        if kind == "video":
+            expected = output_root / f"{job_id}.mp4"
+            result_field = "video_path"
+            media_type = "video/mp4"
+            filename = f"{job_id}.preview.mp4"
+        else:
+            expected = output_root / f"{job_id}.vi.srt"
+            result_field = "srt_path"
+            media_type = "application/x-subrip"
+            filename = f"{job_id}.preview.vi.srt"
+        raw_path = (record.result or {}).get(result_field)
+        candidate = Path(raw_path).absolute() if isinstance(raw_path, str) else None
+        if candidate != expected.absolute() or not expected.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail={
+                    "code": "review_preview_missing",
+                    "message": "File xem trước chưa sẵn sàng",
+                    "retryable": True,
+                },
+            )
+        return FileResponse(expected, media_type=media_type, filename=filename)
+
+    @application.get("/v1/jobs/{job_id}/review/video")
+    def get_review_video(job_id: str, store: StoreDependency) -> FileResponse:
+        return _review_file(job_id, store, "video")
+
+    @application.get("/v1/jobs/{job_id}/review/subtitle")
+    def get_review_subtitle(job_id: str, store: StoreDependency) -> FileResponse:
+        return _review_file(job_id, store, "subtitle")
+
+    @application.post(
+        "/v1/jobs/{job_id}/review/approve", response_model=JobResponse
+    )
+    def approve_review(job_id: str, store: StoreDependency) -> JobResponse:
+        """Release the preview as the finished job (status COMPLETED)."""
+
+        try:
+            record = store.get_job(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        if record.status is not JobStatus.AWAITING_APPROVAL:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "review_not_ready",
+                    "message": "Job chưa tới bước duyệt kết quả cuối",
+                    "retryable": True,
+                },
+            )
+        updated = store.update_status(
+            job_id,
+            JobStatus.COMPLETED,
+            expected_status=JobStatus.AWAITING_APPROVAL,
+            stage=JobStage.DONE,
+            progress_permille=1000,
+            details={**record.details, "phase4_step": "completed"},
+        )
+        return _job_response(updated)
+
+    @application.post(
+        "/v1/jobs/{job_id}/review/reject", response_model=JobResponse
+    )
+    def reject_review(
+        job_id: str, body: ReviewRejectRequest, store: StoreDependency
+    ) -> JobResponse:
+        """Send the job back to the studio queue for fixes."""
+
+        try:
+            record = store.get_job(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        if record.status is not JobStatus.AWAITING_APPROVAL:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "review_not_ready",
+                    "message": "Job chưa tới bước duyệt kết quả cuối",
+                    "retryable": True,
+                },
+            )
+        details = {**record.details, "phase4_step": "review_rejected"}
+        if body.note:
+            details["review_reject_note"] = body.note
+        updated = store.update_status(
+            job_id,
+            JobStatus.READY_TTS,
+            expected_status=JobStatus.AWAITING_APPROVAL,
+            stage=JobStage.TTS,
+            progress_permille=700,
+            details=details,
+        )
+        return _job_response(updated)
 
     @application.delete(
         "/v1/jobs/{job_id}",

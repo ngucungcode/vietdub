@@ -115,6 +115,44 @@ câu gốc, câu đã sửa, giọng, và `synthesized`), `mix` (giá trị hi�
 dụng sau khi gộp default), và `tts_backend` (thực chất là model id
 TTS của job, để UI hiển thị đang dùng engine nào).
 
+## Duyệt kết quả cuối trước khi xuất file
+
+Job tạo từ frontend có thể bật spec `require_final_approval: true`
+(mặc định bật trên UI). Khi đó Phase 4 không kết thúc ở `COMPLETED`
+mà dừng ở trạng thái mới `AWAITING_APPROVAL`: MP4 và SRT đã mux
+xong, QC đã chạy xong, nhưng job **chưa được phát hành** — endpoint
+`GET /v1/jobs/{job_id}/artifacts/{kind}` vẫn yêu cầu `COMPLETED`
+nên chưa tải được file chính thức qua API.
+
+### Xem trước — `GET /v1/jobs/{job_id}/review`
+
+Chỉ mở khi job đang `AWAITING_APPROVAL` (khác trạng thái thì 409
+`review_not_ready`). Trả đúng shape của studio view (cast, script,
+mix, `qc_summary`) cộng `preview_video_url` và
+`preview_subtitle_url`. Hai URL đó trỏ tới:
+
+- `GET /v1/jobs/{job_id}/review/video` — stream MP4 xem trước.
+- `GET /v1/jobs/{job_id}/review/subtitle` — tải SRT xem trước.
+
+### Duyệt — `POST /v1/jobs/{job_id}/review/approve`
+
+Chuyển job sang `COMPLETED` (giữ nguyên result đã niêm phong lúc
+export). Từ lúc này artifacts mới tải được và studio mở lại theo
+luật cũ (sửa từ `COMPLETED` sẽ đưa job về `READY_TTS`).
+
+### Cần sửa — `POST /v1/jobs/{job_id}/review/reject`
+
+Body tùy chọn `{"note": "..."}` (lưu vào details
+`review_reject_note`). Chuyển job về `READY_TTS`, studio mở để sửa
+câu/giọng/mix, rồi Phase 4 chạy lại và dừng ở `AWAITING_APPROVAL`
+một lần nữa. Vòng này lặp được nhiều lần, không giới hạn.
+
+Lưu ý trung thực: file preview nằm trên đĩa máy chủ local; cửa
+duyệt là cửa phát hành qua app (chưa duyệt thì API không cho tải),
+không phải bằng chứng file chưa từng tồn tại trên đĩa. Job không
+bật cờ này (CLI, job cũ) giữ nguyên hành vi cũ: export xong là
+`COMPLETED` luôn.
+
 ## Những gì chưa có
 
 - **Nghe thử giọng mới (audition) trước khi gán:** cần tổng hợp ngoài

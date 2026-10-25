@@ -13,6 +13,8 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from dub_server.domain import normalize_speaker_label
+
 _SPACE_PATTERN = re.compile(r"\s+")
 _PUNCTUATION = frozenset(".!?…;:,。！？；：،؟")
 
@@ -29,13 +31,19 @@ class TranslationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class TranslationBlock:
-    """One normalized source block and its fixed media time slot."""
+    """One normalized source block and its fixed media time slot.
+
+    ``speaker`` is the character label carried from the transcript, if every
+    source segment in the block shares one. Blocks are never merged across
+    different speakers, so a block always belongs to at most one voice.
+    """
 
     start_us: int
     end_us: int
     source_text: str
     translated_text: str = ""
     source_ordinals: tuple[int, ...] = ()
+    speaker: str | None = None
 
     def __post_init__(self) -> None:
         if self.start_us < 0 or self.end_us <= self.start_us:
@@ -60,6 +68,7 @@ class TranslationBlock:
             )
         object.__setattr__(self, "source_text", source_text)
         object.__setattr__(self, "translated_text", translated_text)
+        object.__setattr__(self, "speaker", normalize_speaker_label(self.speaker))
 
 
 TranslationProgress = Callable[[int, int], None]
@@ -116,6 +125,7 @@ def build_translation_blocks(
                 raw_text_value = segment.source_text
             raw_text = str(raw_text_value)
             raw_ordinal = int(getattr(segment, "ordinal", fallback_ordinal))
+            raw_speaker = normalize_speaker_label(getattr(segment, "speaker", None))
         except (AttributeError, TypeError, ValueError) as exc:
             raise TranslationError(
                 "translation_segment_invalid",
@@ -131,12 +141,18 @@ def build_translation_blocks(
         if end_us <= start_us:
             if normalized:
                 previous = normalized[-1]
-                normalized[-1] = TranslationBlock(
-                    previous.start_us,
-                    previous.end_us,
-                    f"{previous.source_text} {text}",
-                    source_ordinals=(*previous.source_ordinals, raw_ordinal),
-                )
+                # A zero-length cue carries no timeline slot of its own. Its
+                # text joins the previous block only when both belong to the
+                # same speaker; otherwise it is dropped rather than spoken
+                # in another character's voice.
+                if previous.speaker == raw_speaker:
+                    normalized[-1] = TranslationBlock(
+                        previous.start_us,
+                        previous.end_us,
+                        f"{previous.source_text} {text}",
+                        source_ordinals=(*previous.source_ordinals, raw_ordinal),
+                        speaker=previous.speaker,
+                    )
                 continue
             raise TranslationError(
                 "translation_timeline_invalid",
@@ -148,6 +164,7 @@ def build_translation_blocks(
             end_us,
             text,
             source_ordinals=(raw_ordinal,),
+            speaker=raw_speaker,
         )
         normalized.extend(
             _split_to_limits(
@@ -335,12 +352,14 @@ def _split_block_once(
             split_us,
             left_text,
             source_ordinals=block.source_ordinals,
+            speaker=block.speaker,
         ),
         TranslationBlock(
             split_us,
             block.end_us,
             right_text,
             source_ordinals=block.source_ordinals,
+            speaker=block.speaker,
         ),
     )
 
@@ -361,6 +380,30 @@ def _merge_blocks(left: TranslationBlock, right: TranslationBlock) -> Translatio
         right.end_us,
         f"{left.source_text} {right.source_text}",
         source_ordinals=left.source_ordinals + right.source_ordinals,
+        speaker=left.speaker,
+    )
+
+
+def _mergeable_ignoring_speaker(
+    left: TranslationBlock,
+    right: TranslationBlock,
+    *,
+    token_counter: TokenCounter,
+    max_duration_us: int,
+    max_tokens: int,
+) -> bool:
+    """The time/token half of :func:`_can_merge`, without the speaker gate.
+
+    Used only to tell "blocked by a speaker change" apart from "blocked
+    because no neighbor can take this block at all".
+    """
+
+    if right.start_us < left.end_us:
+        return False
+    merged_text = f"{left.source_text} {right.source_text}"
+    return (
+        right.end_us - left.start_us <= max_duration_us
+        and _token_count(token_counter, merged_text) <= max_tokens
     )
 
 
@@ -372,12 +415,16 @@ def _can_merge(
     max_duration_us: int,
     max_tokens: int,
 ) -> bool:
-    if right.start_us < left.end_us:
+    # Never merge two characters' lines into one block: the merged block
+    # would be synthesized in a single voice.
+    if left.speaker != right.speaker:
         return False
-    merged_text = f"{left.source_text} {right.source_text}"
-    return (
-        right.end_us - left.start_us <= max_duration_us
-        and _token_count(token_counter, merged_text) <= max_tokens
+    return _mergeable_ignoring_speaker(
+        left,
+        right,
+        token_counter=token_counter,
+        max_duration_us=max_duration_us,
+        max_tokens=max_tokens,
     )
 
 
@@ -413,6 +460,32 @@ def _merge_mandatory_short_blocks(
         ):
             candidates.append((blocks[index + 1].start_us - current.end_us, "right"))
         if not candidates:
+            # A short block wedged between other speakers' lines cannot
+            # merge without mixing voices. It stands alone instead of
+            # failing the job; only a genuinely unmergeable block (too
+            # far from every neighbor, or over the limits) still errors.
+            neighbor_mergeable = (
+                index > 0
+                and _mergeable_ignoring_speaker(
+                    blocks[index - 1],
+                    current,
+                    token_counter=token_counter,
+                    max_duration_us=max_duration_us,
+                    max_tokens=max_tokens,
+                )
+            ) or (
+                index + 1 < len(blocks)
+                and _mergeable_ignoring_speaker(
+                    current,
+                    blocks[index + 1],
+                    token_counter=token_counter,
+                    max_duration_us=max_duration_us,
+                    max_tokens=max_tokens,
+                )
+            )
+            if neighbor_mergeable:
+                index += 1
+                continue
             raise TranslationError(
                 "translation_short_block_unmergeable",
                 "Không thể ghép segment quá ngắn vào khối lân cận",
@@ -533,6 +606,7 @@ def _with_translation(block: TranslationBlock, text: str) -> TranslationBlock:
         block.source_text,
         normalized,
         block.source_ordinals,
+        speaker=block.speaker,
     )
 
 

@@ -420,6 +420,33 @@ def _local_regular_size(path: Path) -> int:
     return metadata.st_size
 
 
+def _parse_speaker_voices(values: list[str]) -> dict[str, dict[str, str | None]] | None:
+    """Parse repeatable ``--speaker-voice NAME=value`` options.
+
+    A value that looks like an audio path (audio extension or a slash)
+    becomes ``reference_path``; anything else becomes ``voice_id`` (for
+    example a Piper ``--speaker`` id). Returns ``None`` when no option
+    was given, so the payload omits the field entirely.
+    """
+
+    result: dict[str, dict[str, str | None]] = {}
+    for item in values:
+        label, separator, value = item.partition("=")
+        label = label.strip()
+        value = value.strip()
+        if not separator or not label or not value:
+            raise typer.BadParameter(
+                "--speaker-voice phải có dạng TEN=gia_tri, ví dụ Anna=3",
+                param_hint="--speaker-voice",
+            )
+        lowered = value.lower()
+        if lowered.endswith((".wav", ".mp3", ".flac", ".ogg")) or "/" in value or "\\" in value:
+            result[label] = {"voice_id": None, "reference_path": value}
+        else:
+            result[label] = {"voice_id": value, "reference_path": None}
+    return result or None
+
+
 def _local_regular_sha256(path: Path) -> tuple[int, str]:
     """Hash a stable local regular file without following a final symlink."""
 
@@ -1169,6 +1196,26 @@ def upload_local_media(
         False,
         "--i-have-voice-rights",
     ),
+    speaker_voice: list[str] = typer.Option(
+        [],
+        "--speaker-voice",
+        help="Lặp lại được, dạng TEN=gia_tri: Anna=3 (Piper speaker id) hoặc Bob=/path/bob.wav (file mẫu).",
+    ),
+    diarize_speakers: bool = typer.Option(
+        False,
+        "--diarize-speakers",
+        help="Tự tách nhân vật bằng diarization trước khi dịch.",
+    ),
+    auto_speaker_voices: bool = typer.Option(
+        False,
+        "--auto-speaker-voices",
+        help="Tự gán giọng Piper riêng cho từng nhân vật chưa có map tay.",
+    ),
+    no_qc: bool = typer.Option(
+        False,
+        "--no-qc",
+        help="Bỏ qua bước AI nghe lại cuối Phase 4.",
+    ),
     wait: bool = typer.Option(
         False,
         "--wait",
@@ -1220,6 +1267,12 @@ def upload_local_media(
                 param_hint="--i-have-voice-rights",
             )
         voice = {"voice_id": voice_id, "reference_path": voice_reference}
+    speaker_voices = _parse_speaker_voices(speaker_voice)
+    if speaker_voices and not voice_rights_confirmed:
+        raise typer.BadParameter(
+            "Phải dùng --i-have-voice-rights khi chọn giọng theo nhân vật",
+            param_hint="--i-have-voice-rights",
+        )
 
     media_size: int | None = None
     subtitle_size: int | None = None
@@ -1249,6 +1302,10 @@ def upload_local_media(
                 },
                 "voice": voice,
                 "voice_rights_confirmed": voice_rights_confirmed,
+                "speaker_voices": speaker_voices,
+                "diarize_speakers": diarize_speakers,
+                "auto_speaker_voices": auto_speaker_voices,
+                "qc_enabled": not no_qc,
             },
         )
         identifier = str(session["id"])
@@ -1404,6 +1461,26 @@ def run_job(
         False,
         "--i-have-voice-rights",
     ),
+    speaker_voice: list[str] = typer.Option(
+        [],
+        "--speaker-voice",
+        help="Lặp lại được, dạng TEN=gia_tri: Anna=3 (Piper speaker id) hoặc Bob=/path/bob.wav (file mẫu).",
+    ),
+    diarize_speakers: bool = typer.Option(
+        False,
+        "--diarize-speakers",
+        help="Tự tách nhân vật bằng diarization trước khi dịch.",
+    ),
+    auto_speaker_voices: bool = typer.Option(
+        False,
+        "--auto-speaker-voices",
+        help="Tự gán giọng Piper riêng cho từng nhân vật chưa có map tay.",
+    ),
+    no_qc: bool = typer.Option(
+        False,
+        "--no-qc",
+        help="Bỏ qua bước AI nghe lại cuối Phase 4.",
+    ),
     wait: bool = typer.Option(
         False,
         "--wait",
@@ -1437,6 +1514,12 @@ def run_job(
                 param_hint="--i-have-voice-rights",
             )
         voice = {"voice_id": voice_id, "reference_path": voice_reference}
+    speaker_voices = _parse_speaker_voices(speaker_voice)
+    if speaker_voices and not voice_rights_confirmed:
+        raise typer.BadParameter(
+            "Phải dùng --i-have-voice-rights khi chọn giọng theo nhân vật",
+            param_hint="--i-have-voice-rights",
+        )
     payload = {
         "release_id": release_id,
         "rights_confirmed": True,
@@ -1451,6 +1534,10 @@ def run_job(
         },
         "voice": voice,
         "voice_rights_confirmed": voice_rights_confirmed,
+        "speaker_voices": speaker_voices,
+        "diarize_speakers": diarize_speakers,
+        "auto_speaker_voices": auto_speaker_voices,
+        "qc_enabled": not no_qc,
     }
     if output is not None and not wait:
         raise typer.BadParameter("--output chỉ dùng cùng --wait", param_hint="--output")

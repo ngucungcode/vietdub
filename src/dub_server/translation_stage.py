@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -46,6 +46,27 @@ _BUILDER_VERSION = "translation-blocks-v1"
 _NATURAL_PROMPT_VERSION = "natural-duration-v1"
 
 
+def _speaker_for_row(row: Any, source_segments: Sequence[Any]) -> str | None:
+    """Recover a published block's speaker from its source ordinals.
+
+    Translation blocks never merge across speakers, so every source
+    ordinal in a block shares one label (or none). The plan rows in
+    SQLite carry no speaker column, so the label is re-derived here from
+    the source transcript instead of migrating the database.
+    """
+
+    ordinals = getattr(row, "source_ordinals", ()) or ()
+    for ordinal in ordinals:
+        if not isinstance(ordinal, int) or isinstance(ordinal, bool):
+            continue
+        if 0 <= ordinal < len(source_segments):
+            speaker = getattr(source_segments[ordinal], "speaker", None)
+            if isinstance(speaker, str) and speaker.strip():
+                return " ".join(speaker.split())[:120]
+            return None
+    return None
+
+
 class _StageCancelled(Exception):
     pass
 
@@ -71,6 +92,11 @@ class TranslationStage:
         translator_factory: TranslatorFactory | None = None,
         model_resolver: ModelResolver = resolve_verified_model,
         shutdown_requested: Callable[[], bool] | None = None,
+        # OPT-IN OpenAI backend. When set, the local model resolver is
+        # skipped entirely: no GGUF is loaded and no VRAM is used for MT.
+        # The caller (see docs/openai-translation.md) must have read the
+        # key from a secret file and must have enabled this explicitly.
+        openai_translator: Translator | None = None,
     ) -> None:
         model_id = default_translation_model_id.strip()
         if not model_id:
@@ -82,7 +108,12 @@ class TranslationStage:
         self._store = store
         self._model_resolver = model_resolver
         self._shutdown_requested = shutdown_requested or (lambda: False)
-        if translator_factory is not None:
+        self._openai_translator = openai_translator
+        if openai_translator is not None:
+            # Factory is unused on the OpenAI path, but keep the attribute
+            # so the rest of the stage does not need a llama binary.
+            self._translator_factory = lambda verified: openai_translator
+        elif translator_factory is not None:
             self._translator_factory = translator_factory
         else:
             if llama_server_binary is None:
@@ -242,6 +273,7 @@ class TranslationStage:
             source_transcript_sha256=source_artifact.sha256,
             duration_us=source.duration_us,
             model_revision=None,
+            source_segments=source.segments,
         )
 
     async def _run_model_translation(
@@ -251,16 +283,32 @@ class TranslationStage:
         source_artifact: Any,
         model_id: str,
     ) -> JobRecord:
-        verified = await asyncio.to_thread(
-            self._model_resolver,
-            self._models_lock_path,
-            self._models_dir,
-            model_id,
-            "mt",
-        )
+        if self._openai_translator is not None:
+            # OpenAI path: no local model to resolve or verify. Provenance
+            # is recorded via model_id + this synthetic tree hash, exactly
+            # like the Vietnamese bypass model below.
+            model_tree_sha256 = hashlib.sha256(
+                f"openai-translation-v1:{model_id}".encode()
+            ).hexdigest()
+            model_revision: str | None = model_id
+            prompt_template_id = "openai-translation-v1"
+            translator = self._openai_translator
+        else:
+            verified = await asyncio.to_thread(
+                self._model_resolver,
+                self._models_lock_path,
+                self._models_dir,
+                model_id,
+                "mt",
+            )
+            model_tree_sha256 = verified.tree_sha256
+            model_revision = str(verified.entry.get("revision") or "") or None
+            prompt_template_id = str(
+                verified.entry.get("prompt_template_id", "gemma4-translation-v1")
+            )
+            translator = self._translator_factory(verified)
         if self._is_cancel_requested(job.id):
             raise _StageCancelled()
-        translator = self._translator_factory(verified)
         try:
             start = getattr(translator, "start", None)
             if callable(start):
@@ -268,9 +316,6 @@ class TranslationStage:
             if self._is_cancel_requested(job.id):
                 raise _StageCancelled()
             timing_profile = self._timing_profile(job)
-            prompt_template_id = str(
-                verified.entry.get("prompt_template_id", "gemma4-translation-v1")
-            )
             if timing_profile is TimingProfile.NATURAL:
                 prompt_template_id = (
                     f"{prompt_template_id}+{_NATURAL_PROMPT_VERSION}"
@@ -290,7 +335,7 @@ class TranslationStage:
                     blocks,
                     source_transcript_sha256=source_artifact.sha256,
                     model_id=model_id,
-                    model_tree_sha256=verified.tree_sha256,
+                    model_tree_sha256=model_tree_sha256,
                     prompt_template_id=prompt_template_id,
                     token_counts=token_counts,
                 )
@@ -300,8 +345,8 @@ class TranslationStage:
                     source_language=source.language,
                     target_language="vi",
                     model_id=model_id,
-                    model_revision=str(verified.entry.get("revision") or "") or None,
-                    model_tree_sha256=verified.tree_sha256,
+                    model_revision=model_revision,
+                    model_tree_sha256=model_tree_sha256,
                     source_transcript_sha256=source_artifact.sha256,
                     plan_sha256=plan_sha,
                     prompt_template_id=prompt_template_id,
@@ -312,7 +357,7 @@ class TranslationStage:
                     job.id,
                     source_transcript_sha256=source_artifact.sha256,
                     model_id=model_id,
-                    model_tree_sha256=verified.tree_sha256,
+                    model_tree_sha256=model_tree_sha256,
                     prompt_template_id=prompt_template_id,
                 )
 
@@ -358,7 +403,8 @@ class TranslationStage:
                 job.id,
                 source_transcript_sha256=source_artifact.sha256,
                 duration_us=source.duration_us,
-                model_revision=str(verified.entry.get("revision") or "") or None,
+                model_revision=model_revision,
+                source_segments=source.segments,
             )
         finally:
             await asyncio.to_thread(translator.close)
@@ -456,6 +502,7 @@ class TranslationStage:
         source_transcript_sha256: str,
         duration_us: int,
         model_revision: str | None,
+        source_segments: Sequence[Any] = (),
     ) -> JobRecord:
         if self._is_cancel_requested(job_id):
             raise _StageCancelled()
@@ -479,6 +526,7 @@ class TranslationStage:
                     row.end_us,
                     row.source_text,
                     row.translated_text or "",
+                    speaker=_speaker_for_row(row, source_segments),
                 )
                 for row in rows
             ),

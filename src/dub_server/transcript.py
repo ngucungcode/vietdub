@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dub_server.domain import SubtitleFormat, TranscriptionResult, TranscriptSegment
+from dub_server.domain import (
+    SubtitleFormat,
+    TranscriptionResult,
+    TranscriptSegment,
+    normalize_speaker_label,
+)
 
 TRANSCRIPT_SCHEMA_VERSION = 1
 DEFAULT_MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
@@ -36,6 +41,46 @@ _HTML_TAG = re.compile(r"<[^>]*>")
 _ASS_OVERRIDE = re.compile(r"\{[^{}]*\}")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+# A speaker label on the first line of a cue, e.g. "ANNA: Xin chào".
+# The label must start with a letter so a clock like "12:30" never matches,
+# and the spoken remainder must be non-empty so a bare "ANNA:" stays text.
+_SPEAKER_LABEL = re.compile(
+    r"^(?P<label>[^\W\d_][\w .'\-]{0,39}):\s+(?P<rest>.+)$",
+    re.DOTALL,
+)
+_DIALOGUE_DASH = ("- ", "– ", "— ")
+# ASS styles that describe layout, not a character; they must not become a
+# speaker just because a file leaves the Name field empty.
+_GENERIC_ASS_STYLES = frozenset({"default", "defaulttop", "defaultbottom", "main", "alt"})
+
+
+def split_speaker_label(text: str) -> tuple[str | None, str]:
+    """Split a leading ``NAME:`` speaker label off cue text, if present.
+
+    Returns ``(speaker, spoken_text)``. When no label is found the speaker
+    is ``None`` and the text is returned unchanged. A leading dialogue dash
+    (``- ANNA: ...``) is tolerated, and ASS override blocks before the
+    label are ignored for matching but kept out of the spoken text only
+    when a label is actually found.
+    """
+
+    body = text.strip()
+    for dash in _DIALOGUE_DASH:
+        if body.startswith(dash):
+            body = body[len(dash):].lstrip()
+            break
+    first, separator, rest = body.partition("\n")
+    # Formatting tags are stripped by _clean_text later anyway, so they are
+    # ignored here too: "<i>ANNA: ..." still names its speaker.
+    candidate = _HTML_TAG.sub("", _ASS_OVERRIDE.sub("", first)).strip()
+    match = _SPEAKER_LABEL.match(candidate)
+    if match is None:
+        return None, text
+    spoken_first = match.group("rest").strip()
+    if not spoken_first:
+        return None, text
+    spoken = spoken_first if not separator else f"{spoken_first}\n{rest}"
+    return normalize_speaker_label(match.group("label")), spoken
 
 
 class TranscriptError(ValueError):
@@ -63,6 +108,7 @@ class _RawCue:
     end_us: int
     text: str
     sequence: int
+    speaker: str | None = None
 
 
 def parse_subtitle_file(
@@ -293,7 +339,8 @@ def _parse_timed_text(text: str, *, webvtt: bool) -> tuple[_RawCue, ...]:
             end_us = _clock_to_us(timing.group("end"))
         except ValueError:
             continue
-        cues.append(_RawCue(start_us, end_us, "\n".join(body), sequence))
+        speaker, spoken = split_speaker_label("\n".join(body))
+        cues.append(_RawCue(start_us, end_us, spoken, sequence, speaker))
         sequence += 1
     return tuple(cues)
 
@@ -343,7 +390,20 @@ def _parse_ass(text: str) -> tuple[_RawCue, ...]:
             end_us = _clock_to_us(record["end"])
         except (KeyError, ValueError):
             continue
-        cues.append(_RawCue(start_us, end_us, record.get("text", ""), sequence))
+        # The Name field names the character. Only fall back to the Style
+        # when it is clearly a character style, never a layout default.
+        # A "NAME:" prefix inside the dialogue is stripped from the spoken
+        # text whenever present, whatever named the speaker.
+        raw_text = record.get("text", "")
+        label_speaker, spoken = split_speaker_label(raw_text)
+        speaker = normalize_speaker_label(record.get("name"))
+        if speaker is None:
+            style = normalize_speaker_label(record.get("style"))
+            if style is not None and style.casefold() not in _GENERIC_ASS_STYLES:
+                speaker = style
+        if speaker is None:
+            speaker = label_speaker
+        cues.append(_RawCue(start_us, end_us, spoken, sequence, speaker))
         sequence += 1
     return tuple(cues)
 
@@ -361,7 +421,12 @@ def _normalize_cues(
         text = _clean_text(cue.text)
         if not text or end_us <= start_us:
             continue
-        segment = TranscriptSegment(start_us=start_us, end_us=end_us, text=text)
+        segment = TranscriptSegment(
+            start_us=start_us,
+            end_us=end_us,
+            text=text,
+            speaker=cue.speaker,
+        )
         segments.append(segment)
         previous_end_us = segment.end_us
     return tuple(segments)
@@ -490,6 +555,8 @@ def _serialize_result(result: TranscriptionResult) -> bytes:
                 "text": segment.text,
                 "average_log_probability": segment.average_log_probability,
                 "no_speech_probability": segment.no_speech_probability,
+                # Absent in artifacts written before speaker labels existed.
+                "speaker": segment.speaker,
             }
             for segment in result.segments
         ],
@@ -537,6 +604,8 @@ def _deserialize_result(payload: bytes) -> TranscriptionResult:
                 no_speech_probability=_optional_probability(
                     raw.get("no_speech_probability"), "no_speech_probability"
                 ),
+                # Old artifacts have no speaker key; that means unknown.
+                speaker=normalize_speaker_label(raw.get("speaker")),
             )
         except ValueError as exc:
             raise TranscriptError("Segment transcript kh\u00f4ng h\u1ee3p l\u1ec7") from exc

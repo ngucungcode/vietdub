@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     default_tts_model_id: str = "tts-vieneu-v2"
     tts_support_model_id: str = "tts-neucodec-onnx-int8"
     asr_compute_type: str = "float16"
+    diarization_pipeline_path: Path | None = None
     asr_language_confidence_threshold: float = Field(
         default=0.5,
         ge=0.0,

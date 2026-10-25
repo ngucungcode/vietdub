@@ -33,6 +33,18 @@ Windows 10/11 x64 hỗ trợ dashboard/API/worker native, không cần WSL hoặ
 
 ## Cài đặt
 
+### Cài nhanh một lệnh / một cú nhấp
+
+Ubuntu (máy trống, chỉ cần `curl` + `sudo`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/vietdub/main/quick-install.sh | sudo bash
+```
+
+Windows: nhấp đúp `quick-install.bat` trong source (hoặc tải riêng file
+đó rồi nhấp đúp). Chi tiết, tùy chọn và lưu ý an toàn: xem
+`docs/one-command-install.md`.
+
 ### Ubuntu
 
 ```bash

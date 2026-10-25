@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .domain import TranscriptionResult
+from .domain import TranscriptionResult, normalize_speaker_label
 
 TRANSLATION_ARTIFACT_SCHEMA_VERSION = 1
 DEFAULT_MAX_TRANSLATION_ARTIFACT_BYTES = 64 * 1024 * 1024
@@ -44,6 +44,7 @@ class TranslationSegment:
     end_us: int
     source_text: str
     translated_text: str
+    speaker: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -61,6 +62,7 @@ class TranslationSegment:
         )
         object.__setattr__(self, "source_text", source_text)
         object.__setattr__(self, "translated_text", translated_text)
+        object.__setattr__(self, "speaker", _normalize_speaker(self.speaker))
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +155,7 @@ def build_translation_result(
             end_us=source_segment.end_us,
             source_text=source_segment.text,
             translated_text=translated_text,
+            speaker=getattr(source_segment, "speaker", None),
         )
         for source_segment, translated_text in zip(
             source.segments, translations, strict=True
@@ -344,6 +347,8 @@ def _serialize_result(result: TranslationResult) -> bytes:
                 "end_us": segment.end_us,
                 "source_text": segment.source_text,
                 "translated_text": segment.translated_text,
+                # Absent in artifacts written before speaker labels existed.
+                "speaker": segment.speaker,
             }
             for ordinal, segment in enumerate(result.segments)
         ],
@@ -401,6 +406,8 @@ def _deserialize_result(payload: bytes) -> TranslationResult:
                 end_us=_strict_int(segment_data.get("end_us"), "end_us"),
                 source_text=source_text,
                 translated_text=translated_text,
+                # Old artifacts have no speaker key; that means unknown.
+                speaker=_normalize_speaker(segment_data.get("speaker")),
             )
         )
     source_language = source.get("language")
@@ -458,6 +465,15 @@ def _normalize_text(value: object, *, field_name: str) -> str:
     if not normalized:
         raise TranslationArtifactError(f"{field_name} must not be empty")
     return normalized
+
+
+def _normalize_speaker(value: object) -> str | None:
+    """Normalize an optional speaker label; a wrong type is an artifact error."""
+
+    try:
+        return normalize_speaker_label(value)
+    except ValueError as exc:
+        raise TranslationArtifactError("Speaker label is invalid") from exc
 
 
 def _normalize_language(value: object, *, field_name: str) -> str:

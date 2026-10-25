@@ -109,6 +109,76 @@ type Job = {
   updated_at: string;
 };
 
+type StudioCastMember = {
+  speaker: string;
+  display_name?: string | null;
+  line_count?: number;
+  first_start_us?: number;
+  voice_id?: string | null;
+  reference_path?: string | null;
+};
+
+type StudioScriptLine = {
+  ordinal: number;
+  start_us: number;
+  end_us: number;
+  speaker?: string | null;
+  display_name?: string | null;
+  text: string;
+  original_text?: string | null;
+  voice_id?: string | null;
+  synthesized?: boolean;
+  qc_status?: string | null;
+  qc_heard?: string | null;
+  qc_wer?: number | null;
+};
+
+type StudioQcSummary = {
+  total?: number;
+  ok?: number;
+  minor?: number;
+  review?: number;
+  bad?: number;
+  silent?: number;
+  needs_attention?: number;
+  mean_wer?: number;
+};
+
+type StudioMix = {
+  narration_lufs?: number | null;
+  accompaniment_lufs?: number | null;
+  ducking_ratio?: number | null;
+  ducking_threshold?: number | null;
+  true_peak_db?: number | null;
+};
+
+type StudioView = {
+  job_id: string;
+  status: string;
+  editable: boolean;
+  cast: StudioCastMember[];
+  script: StudioScriptLine[];
+  mix: StudioMix;
+  tts_backend: string;
+  qc_summary?: StudioQcSummary | null;
+};
+
+type StudioCastResponse = (StudioView & { requeued?: boolean }) | { requeued?: boolean };
+
+type StudioCastDraft = {
+  display_name: string;
+  voice_id: string;
+  reference_path: string;
+};
+
+type StudioMixDraft = {
+  narration_lufs: string;
+  accompaniment_lufs: string;
+  ducking_ratio: string;
+  ducking_threshold: string;
+  true_peak_db: string;
+};
+
 type SubtitleCandidate = {
   subtitle_id: string;
   source?: string;
@@ -531,6 +601,15 @@ function formatDurationUs(value: unknown) {
     : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatMmSs(value: unknown) {
+  const parsed = nonNegativeNumber(value);
+  if (parsed === null) return "??:??";
+  const totalSeconds = Math.floor(parsed / 1_000_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function formatCount(value: unknown) {
   const parsed = nonNegativeNumber(value);
   return parsed === null ? "—" : Math.round(parsed).toLocaleString("vi-VN");
@@ -588,6 +667,9 @@ function warningMessages(...values: unknown[]): string[] {
 function messageOf(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
+
+const STUDIO_REQUEUE_NOTICE =
+  "Đã đưa job về hàng chờ chạy lại Phase 4 (chỉ thu lại phần thay đổi, các câu khác giữ nguyên, trừ khi đổi giọng thì thu lại toàn bộ)";
 
 function stagePosition(job: Job) {
   if (job.status === "completed") return stageOrder.length - 1;
@@ -759,6 +841,19 @@ export default function Home() {
   const [openSubApiKey, setOpenSubApiKey] = useState("");
   const [openSubUsername, setOpenSubUsername] = useState("");
   const [openSubPassword, setOpenSubPassword] = useState("");
+  const [studio, setStudio] = useState<StudioView | null>(null);
+  const [studioError, setStudioError] = useState<string | null>(null);
+  const [studioNotice, setStudioNotice] = useState<string | null>(null);
+  const [studioBusy, setStudioBusy] = useState<string | null>(null);
+  const [castDraft, setCastDraft] = useState<Record<string, StudioCastDraft>>({});
+  const [scriptDraft, setScriptDraft] = useState<Record<number, string>>({});
+  const [mixDraft, setMixDraft] = useState<StudioMixDraft>({
+    narration_lufs: "",
+    accompaniment_lufs: "",
+    ducking_ratio: "",
+    ducking_threshold: "",
+    true_peak_db: "",
+  });
   const uploadRequestRef = useRef<XMLHttpRequest | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const uploadSessionIdRef = useRef<string | null>(null);
@@ -1253,6 +1348,201 @@ export default function Home() {
       setProblem(messageOf(error, "Không thể xác nhận nguồn lời thoại."));
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  const studioJobId = selectedJob?.id ?? null;
+
+  function syncStudioDrafts(view: StudioView) {
+    const nextCast: Record<string, StudioCastDraft> = {};
+    for (const member of view.cast) {
+      nextCast[member.speaker] = {
+        display_name: member.display_name ?? "",
+        voice_id: member.voice_id ?? "",
+        reference_path: member.reference_path ?? "",
+      };
+    }
+    setCastDraft(nextCast);
+    const nextScript: Record<number, string> = {};
+    for (const line of view.script) {
+      nextScript[line.ordinal] = line.text;
+    }
+    setScriptDraft(nextScript);
+    setMixDraft({
+      narration_lufs: view.mix.narration_lufs?.toString() ?? "",
+      accompaniment_lufs: view.mix.accompaniment_lufs?.toString() ?? "",
+      ducking_ratio: view.mix.ducking_ratio?.toString() ?? "",
+      ducking_threshold: view.mix.ducking_threshold?.toString() ?? "",
+      true_peak_db: view.mix.true_peak_db?.toString() ?? "",
+    });
+  }
+
+  const refreshStudio = useCallback(async (jobId: string) => {
+    setStudioError(null);
+    try {
+      const view = await api<StudioView>(`/jobs/${encodeURIComponent(jobId)}/studio`);
+      setStudio(view);
+      syncStudioDrafts(view);
+    } catch (error) {
+      setStudio(null);
+      setStudioError(messageOf(error, "Không thể tải Studio lồng tiếng."));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!studioJobId) {
+      setStudio(null);
+      setStudioError(null);
+      setStudioNotice(null);
+      return;
+    }
+    setStudio(null);
+    setStudioNotice(null);
+    void refreshStudio(studioJobId);
+  }, [studioJobId, refreshStudio]);
+
+  async function saveStudioCast(jobId: string) {
+    if (!studio) return;
+    setStudioBusy("cast");
+    setStudioError(null);
+    setStudioNotice(null);
+    try {
+      const clean = (value: string) => {
+        const trimmed = value.trim();
+        return trimmed ? trimmed : null;
+      };
+      const result = await api<StudioCastResponse>(
+        `/jobs/${encodeURIComponent(jobId)}/studio/cast`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            speakers: studio.cast.map((member) => {
+              const draft = castDraft[member.speaker] ?? {
+                display_name: member.display_name ?? "",
+                voice_id: member.voice_id ?? "",
+                reference_path: member.reference_path ?? "",
+              };
+              return {
+                speaker: member.speaker,
+                display_name: clean(draft.display_name),
+                voice_id: clean(draft.voice_id),
+                reference_path: clean(draft.reference_path),
+              };
+            }),
+          }),
+        },
+      );
+      if (result && typeof result === "object" && "cast" in result) {
+        setStudio(result);
+        syncStudioDrafts(result);
+      } else {
+        await refreshStudio(jobId);
+      }
+      setStudioNotice(result.requeued ? STUDIO_REQUEUE_NOTICE : "Đã lưu bảng cast.");
+      await refreshOverview();
+    } catch (error) {
+      setStudioError(messageOf(error, "Không thể lưu bảng cast."));
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function saveStudioLine(jobId: string, line: StudioScriptLine) {
+    const key = `line:${line.ordinal}`;
+    setStudioBusy(key);
+    setStudioError(null);
+    setStudioNotice(null);
+    try {
+      const result = await api<{ ordinal: number; text: string; requeued?: boolean }>(
+        `/jobs/${encodeURIComponent(jobId)}/studio/script/${line.ordinal}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ text: scriptDraft[line.ordinal] ?? line.text }),
+        },
+      );
+      setStudio((current) =>
+        current
+          ? {
+              ...current,
+              script: current.script.map((item) =>
+                item.ordinal === result.ordinal ? { ...item, text: result.text } : item,
+              ),
+            }
+          : current,
+      );
+      setScriptDraft((current) => ({ ...current, [result.ordinal]: result.text }));
+      setStudioNotice(result.requeued ? STUDIO_REQUEUE_NOTICE : "Đã lưu câu thoại.");
+      await refreshOverview();
+    } catch (error) {
+      setStudioError(messageOf(error, "Không thể lưu câu thoại."));
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function retakeStudioLines(jobId: string, ordinals: number[]) {
+    const key = `retake:${ordinals.join(",")}`;
+    setStudioBusy(key);
+    setStudioError(null);
+    setStudioNotice(null);
+    try {
+      const result = await api<{ retaken?: number[]; requeued?: boolean }>(
+        `/jobs/${encodeURIComponent(jobId)}/studio/retake`,
+        { method: "POST", body: JSON.stringify({ ordinals }) },
+      );
+      await refreshStudio(jobId);
+      const count = result.retaken?.length ?? ordinals.length;
+      setStudioNotice(
+        result.requeued ? STUDIO_REQUEUE_NOTICE : `Đã gửi thu lại ${count} câu.`,
+      );
+      await refreshOverview();
+    } catch (error) {
+      setStudioError(messageOf(error, "Không thể gửi thu lại."));
+    } finally {
+      setStudioBusy(null);
+    }
+  }
+
+  async function saveStudioMix(jobId: string) {
+    setStudioBusy("mix");
+    setStudioError(null);
+    setStudioNotice(null);
+    try {
+      const numeric = (value: string) => {
+        const trimmed = value.trim();
+        if (!trimmed) return undefined;
+        const parsed = Number(trimmed);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+      const result = await api<{ mix?: StudioMix; requeued?: boolean }>(
+        `/jobs/${encodeURIComponent(jobId)}/studio/mix`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            narration_lufs: numeric(mixDraft.narration_lufs),
+            accompaniment_lufs: numeric(mixDraft.accompaniment_lufs),
+            ducking_ratio: numeric(mixDraft.ducking_ratio),
+            ducking_threshold: numeric(mixDraft.ducking_threshold),
+            true_peak_db: numeric(mixDraft.true_peak_db),
+          }),
+        },
+      );
+      if (result.mix) {
+        setStudio((current) => (current ? { ...current, mix: result.mix as StudioMix } : current));
+        setMixDraft({
+          narration_lufs: result.mix.narration_lufs?.toString() ?? "",
+          accompaniment_lufs: result.mix.accompaniment_lufs?.toString() ?? "",
+          ducking_ratio: result.mix.ducking_ratio?.toString() ?? "",
+          ducking_threshold: result.mix.ducking_threshold?.toString() ?? "",
+          true_peak_db: result.mix.true_peak_db?.toString() ?? "",
+        });
+      }
+      setStudioNotice(result.requeued ? STUDIO_REQUEUE_NOTICE : "Đã lưu thông số mix.");
+      await refreshOverview();
+    } catch (error) {
+      setStudioError(messageOf(error, "Không thể lưu thông số mix."));
+    } finally {
+      setStudioBusy(null);
     }
   }
 
@@ -2152,6 +2442,286 @@ export default function Home() {
                 <a href={`/v1/jobs/${selectedJob.id}/artifacts/timing`}>Timing JSON</a>
               </div>
             </div>
+          )}
+        </section>
+      )}
+
+      {selectedJob && (
+        <section className="panel studio-panel" aria-labelledby="studio-title">
+          <div className="panel-heading">
+            <div>
+              <h2 id="studio-title">Studio lồng tiếng</h2>
+            </div>
+            <button
+              className="small-button"
+              type="button"
+              onClick={() => void refreshStudio(selectedJob.id)}
+            >
+              Tải lại studio
+            </button>
+          </div>
+          <p className="section-intro">
+            Bảng cast, kịch bản và thông số mix của job này.
+            {studio ? ` Backend TTS: ${studio.tts_backend}.` : ""}
+          </p>
+          {studio?.qc_summary && (
+            <p className="helper-copy">
+              AI nghe lại: {studio.qc_summary.ok ?? 0}/{studio.qc_summary.total ?? 0} câu khớp kịch bản
+              {studio.qc_summary.needs_attention
+                ? `, ${studio.qc_summary.needs_attention} câu cần chú ý (sai nhiều: ${studio.qc_summary.bad ?? 0}, không nghe thấy: ${studio.qc_summary.silent ?? 0}, nên nghe lại: ${studio.qc_summary.review ?? 0}).`
+                : ". Mọi câu đều khớp."}
+            </p>
+          )}
+
+          {studioError && (
+            <div className="notice error" role="status">{studioError}</div>
+          )}
+          {studioNotice && (
+            <div className="notice" role="status">{studioNotice}</div>
+          )}
+          {!studio && !studioError && <p className="helper-copy">Đang tải studio…</p>}
+
+          {studio && !studio.editable && (
+            <div className="notice" role="status">
+              Studio mở khi job đã hoàn tất hoặc đã dịch xong, đang chờ thuyết minh
+            </div>
+          )}
+
+          {studio && studio.editable && (
+            <>
+              <div>
+                <span className="action-kicker">BẢNG CAST</span>
+                <h3>Nhân vật và giọng đọc</h3>
+                <p className="helper-copy">
+                  Đổi tên hiển thị hoặc giọng rồi bấm Lưu cast để gửi toàn bộ bảng một lần.
+                </p>
+              </div>
+              {studio.cast.length === 0 && (
+                <p className="helper-copy">Job này chưa có nhân vật nào.</p>
+              )}
+              <div className="studio-cast">
+                {studio.cast.map((member) => {
+                  const draft = castDraft[member.speaker] ?? {
+                    display_name: member.display_name ?? "",
+                    voice_id: member.voice_id ?? "",
+                    reference_path: member.reference_path ?? "",
+                  };
+                  return (
+                    <article key={member.speaker} className="studio-cast-row">
+                      <div className="studio-cast-name">
+                        <strong>{member.display_name || member.speaker}</strong>
+                        <small>
+                          Nhãn gốc: {member.speaker}
+                          {typeof member.line_count === "number" ? ` · ${member.line_count} câu` : ""}
+                          {typeof member.first_start_us === "number"
+                            ? ` · bắt đầu ${formatMmSs(member.first_start_us)}`
+                            : ""}
+                        </small>
+                      </div>
+                      <label className="field">
+                        <span>Tên hiển thị</span>
+                        <input
+                          value={draft.display_name}
+                          onChange={(event) =>
+                            setCastDraft((current) => ({
+                              ...current,
+                              [member.speaker]: { ...draft, display_name: event.target.value },
+                            }))
+                          }
+                          placeholder={member.speaker}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Voice ID (Piper)</span>
+                        <input
+                          value={draft.voice_id}
+                          onChange={(event) =>
+                            setCastDraft((current) => ({
+                              ...current,
+                              [member.speaker]: { ...draft, voice_id: event.target.value },
+                            }))
+                          }
+                          placeholder="VD: 3"
+                        />
+                      </label>
+                      <label className="field">
+                        <span>File giọng mẫu</span>
+                        <input
+                          value={draft.reference_path}
+                          onChange={(event) =>
+                            setCastDraft((current) => ({
+                              ...current,
+                              [member.speaker]: { ...draft, reference_path: event.target.value },
+                            }))
+                          }
+                          placeholder="/path/voice.wav"
+                        />
+                      </label>
+                    </article>
+                  );
+                })}
+              </div>
+              {studio.cast.length > 0 && (
+                <div className="detail-actions">
+                  <button
+                    className="small-button download"
+                    type="button"
+                    disabled={studioBusy === "cast"}
+                    onClick={() => void saveStudioCast(selectedJob.id)}
+                  >
+                    {studioBusy === "cast" ? "Đang lưu…" : "Lưu cast"}
+                  </button>
+                </div>
+              )}
+
+              <div>
+                <span className="action-kicker">KỊCH BẢN</span>
+                <h3>Câu thoại</h3>
+              </div>
+              {studio.script.length === 0 && (
+                <p className="helper-copy">Job này chưa có câu thoại nào.</p>
+              )}
+              <div className="studio-script">
+                {studio.script.map((line) => {
+                  const text = scriptDraft[line.ordinal] ?? line.text;
+                  const busyLine = studioBusy === `line:${line.ordinal}`;
+                  const busyRetake = studioBusy === `retake:${line.ordinal}`;
+                  return (
+                    <article key={line.ordinal} className="studio-line">
+                      <div className="studio-line-meta">
+                        <strong>Câu {line.ordinal + 1}</strong>
+                        <span>{formatMmSs(line.start_us)}</span>
+                        <span>{line.display_name || line.speaker || "Không rõ nhân vật"}</span>
+                        {line.voice_id && <small>Giọng: {line.voice_id}</small>}
+                        {line.synthesized && <small>Đã thu</small>}
+                        {line.qc_status && line.qc_status !== "ok" && (
+                          <small>
+                            AI nghe: {line.qc_status === "silent"
+                              ? "không nghe thấy gì"
+                              : line.qc_status === "bad"
+                                ? "sai nhiều, cần thu lại"
+                                : line.qc_status === "review"
+                                  ? "nên nghe lại"
+                                  : "lệch nhẹ"}
+                            {line.qc_wer != null && ` (WER ${(line.qc_wer * 100).toFixed(0)}%)`}
+                            {line.qc_heard ? ` — nghe ra: “${line.qc_heard}”` : ""}
+                          </small>
+                        )}
+                      </div>
+                      <label className="field grow">
+                        <span>Câu thoại</span>
+                        <textarea
+                          rows={2}
+                          value={text}
+                          onChange={(event) =>
+                            setScriptDraft((current) => ({
+                              ...current,
+                              [line.ordinal]: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <div className="studio-line-actions">
+                        <button
+                          className="small-button"
+                          type="button"
+                          disabled={busyLine}
+                          onClick={() => void saveStudioLine(selectedJob.id, line)}
+                        >
+                          {busyLine ? "Đang lưu…" : "Lưu câu"}
+                        </button>
+                        <button
+                          className="small-button download"
+                          type="button"
+                          disabled={busyRetake}
+                          onClick={() => void retakeStudioLines(selectedJob.id, [line.ordinal])}
+                        >
+                          {busyRetake ? "Đang gửi…" : "Thu lại câu"}
+                        </button>
+                      </div>
+                      {line.synthesized && (
+                        <audio
+                          controls
+                          src={`/v1/jobs/${encodeURIComponent(selectedJob.id)}/studio/lines/${line.ordinal}/audio`}
+                        />
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+
+              <div>
+                <span className="action-kicker">PHÒNG MIX</span>
+                <h3>Thông số mix cuối</h3>
+              </div>
+              <div className="studio-mix">
+                <label className="field">
+                  <span>Lời thoại (LUFS)</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={mixDraft.narration_lufs}
+                    onChange={(event) =>
+                      setMixDraft((current) => ({ ...current, narration_lufs: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Nhạc nền (LUFS)</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={mixDraft.accompaniment_lufs}
+                    onChange={(event) =>
+                      setMixDraft((current) => ({ ...current, accompaniment_lufs: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Tỉ lệ ducking</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={mixDraft.ducking_ratio}
+                    onChange={(event) =>
+                      setMixDraft((current) => ({ ...current, ducking_ratio: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Ngưỡng ducking</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={mixDraft.ducking_threshold}
+                    onChange={(event) =>
+                      setMixDraft((current) => ({ ...current, ducking_threshold: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>True peak (dB)</span>
+                  <input
+                    type="number"
+                    step="any"
+                    value={mixDraft.true_peak_db}
+                    onChange={(event) =>
+                      setMixDraft((current) => ({ ...current, true_peak_db: event.target.value }))
+                    }
+                  />
+                </label>
+              </div>
+              <div className="detail-actions">
+                <button
+                  className="small-button download"
+                  type="button"
+                  disabled={studioBusy === "mix"}
+                  onClick={() => void saveStudioMix(selectedJob.id)}
+                >
+                  {studioBusy === "mix" ? "Đang lưu…" : "Lưu mix"}
+                </button>
+              </div>
+            </>
           )}
         </section>
       )}

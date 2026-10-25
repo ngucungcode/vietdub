@@ -221,6 +221,8 @@ def build_transcription_stage(
             device=settings.compute_mode,
         ),
         shutdown_requested=shutdown.is_set,
+        diarization_pipeline_path=settings.diarization_pipeline_path,
+        diarization_device="cuda" if settings.compute_mode == "gpu" else "cpu",
     )
 
 

@@ -60,6 +60,7 @@ from .config import (
 )
 from .domain import (
     SubtitleFormat,
+    normalize_speaker_label,
 )
 from .gpu import (
     NvidiaGpu,
@@ -85,7 +86,22 @@ from .state import (
     StateStore,
     StorageQuotaExceeded,
 )
+from .speaker_voices import parse_speaker_voices
+from .studio import (
+    STUDIO_EDITABLE_STATUSES,
+    StudioError,
+    build_cast_view,
+    build_script_view,
+    parse_line_overrides,
+    parse_speaker_names,
+    parse_studio_mix,
+)
 from .transcript import TranscriptError, parse_subtitle_file
+from .translation_artifact import (
+    TranslationArtifact,
+    TranslationArtifactError,
+    load_translation_artifact,
+)
 
 _SHA256_HEX = frozenset("0123456789abcdef")
 _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS = frozenset(
@@ -299,6 +315,23 @@ class UploadCreateRequest(BaseModel):
     models: ModelSelection = Field(default_factory=ModelSelection)
     voice: VoiceSelection | None = None
     voice_rights_confirmed: bool = False
+    # Per-character voices, keyed by the speaker label parsed from the
+    # subtitle file (see docs/per-character-voices.md). Values use the
+    # same shape as ``voice``; characters without an entry use the job's
+    # default voice. Stored verbatim into the job spec.
+    speaker_voices: dict[str, VoiceSelection] | None = None
+    # Automatic speaker diarization (see docs/auto-speaker-diarization.md).
+    # Requires a locally configured diarization pipeline on the server;
+    # without one the job fails with a plain message instead of running
+    # unlabeled. Only affects the transcript stage.
+    diarize_speakers: bool = False
+    # Automatic per-character Piper voices when no explicit entry covers
+    # a speaker: voices are assigned by first appearance (or by the
+    # SPEAKER_xx number for diarized labels). Piper only.
+    auto_speaker_voices: bool = False
+    # AI listen-back after Phase 4 (see docs/studio.md). Best-effort:
+    # when False the job skips it entirely.
+    qc_enabled: bool = True
     glossary: Glossary = Field(default_factory=dict)
 
 
@@ -1088,6 +1121,229 @@ def _job_response(record: JobRecord) -> JobResponse:
     return JobResponse.model_validate(record.to_dict())
 
 
+class StudioCastSpeaker(BaseModel):
+    """One cast row: raw label plus optional display name and voice."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    speaker: str = Field(min_length=1, max_length=120)
+    display_name: str | None = Field(default=None, max_length=120)
+    voice_id: str | None = Field(default=None, max_length=200)
+    reference_path: str | None = Field(default=None, max_length=1000)
+
+
+class StudioCastRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speakers: list[StudioCastSpeaker] = Field(min_length=1)
+
+
+class StudioLineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class StudioRetakeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ordinals: list[int] = Field(min_length=1)
+
+
+class StudioMixRequest(BaseModel):
+    """Mix overrides; fields are validated by parse_studio_mix."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _studio_translation(
+    store: StateStore, settings: Settings, job_id: str
+) -> TranslationArtifact:
+    """Load the sealed translation artifact a studio view is built from."""
+
+    record = store.get_job(job_id)
+    raw_digest = record.details.get("translated_transcript_sha256")
+    source_digest = record.details.get("source_transcript_sha256")
+    if not isinstance(raw_digest, str) or not isinstance(source_digest, str):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "studio_not_ready",
+                "message": "Job chưa có bản dịch nên chưa mở được studio",
+                "retryable": False,
+            },
+        )
+    path = settings.jobs_dir.resolve(strict=False) / job_id / "translated-transcript.json"
+    try:
+        return load_translation_artifact(
+            path,
+            expected_sha256=raw_digest,
+            expected_source_transcript_sha256=source_digest,
+        )
+    except (TranslationArtifactError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "studio_not_ready",
+                "message": "Không đọc được bản dịch của job",
+                "retryable": False,
+            },
+        ) from exc
+
+
+def _studio_require_editable(record: JobRecord) -> None:
+    if record.status not in STUDIO_EDITABLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "studio_not_editable",
+                "message": (
+                    "Studio chỉ sửa được job đã hoàn tất hoặc đã dịch xong "
+                    "đang chờ thuyết minh; job đang chạy thì chờ nó xong đã"
+                ),
+                "retryable": True,
+            },
+        )
+
+
+def _studio_mix_view(record: JobRecord, settings: Settings) -> dict[str, float]:
+    """Effective mix: stage defaults merged with the job's overrides."""
+
+    mix: dict[str, float] = {
+        "narration_lufs": float(settings.narration_target_lufs),
+        "accompaniment_lufs": -24.0,
+        "true_peak_db": -1.5,
+        "ducking_threshold": 0.04,
+        "ducking_ratio": 3.0,
+        "ducking_attack_ms": 20.0,
+        "ducking_release_ms": 300.0,
+    }
+    try:
+        mix.update(parse_studio_mix(record.spec.get("studio_mix")))
+    except StudioError:
+        # A mix the API never wrote cannot exist; a corrupt spec must not
+        # take down the read view, so the defaults stand.
+        pass
+    return mix
+
+
+def _studio_view(
+    store: StateStore, settings: Settings, record: JobRecord
+) -> dict[str, Any]:
+    artifact = _studio_translation(store, settings, record.id)
+    checkpoint = store.get_checkpoint(record.id, JobStage.TTS)
+    tts_payload = checkpoint.payload if checkpoint is not None else None
+    models = record.spec.get("models")
+    tts_model_id = models.get("tts") if isinstance(models, dict) else None
+    script = build_script_view(
+        artifact.result.segments, record.spec, tts_payload
+    )
+    qc_summary: dict[str, Any] | None = None
+    qc_path = (
+        settings.jobs_dir.resolve(strict=False) / record.id / "qc-report.json"
+    )
+    if qc_path.is_file():
+        try:
+            qc_report = json.loads(qc_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            qc_report = None
+        if isinstance(qc_report, dict):
+            summary = qc_report.get("summary")
+            if isinstance(summary, dict):
+                qc_summary = summary
+            qc_lines = qc_report.get("lines")
+            if isinstance(qc_lines, list):
+                by_ordinal: dict[int, dict[str, Any]] = {}
+                for item in qc_lines:
+                    if (
+                        isinstance(item, dict)
+                        and isinstance(item.get("ordinal"), int)
+                    ):
+                        by_ordinal[int(item["ordinal"])] = item
+                for row in script:
+                    qc_row = by_ordinal.get(int(row["ordinal"]))
+                    if qc_row is not None:
+                        row["qc_status"] = qc_row.get("status")
+                        row["qc_heard"] = qc_row.get("heard")
+                        row["qc_wer"] = qc_row.get("wer")
+    return {
+        "job_id": record.id,
+        "status": record.status.value,
+        "editable": record.status in STUDIO_EDITABLE_STATUSES,
+        "cast": build_cast_view(artifact.result.segments, record.spec),
+        "script": script,
+        "mix": _studio_mix_view(record, settings),
+        # The TTS model id (not the backend name): the UI shows which
+        # voice engine the job uses.
+        "tts_backend": tts_model_id,
+        "qc_summary": qc_summary,
+    }
+
+
+def _studio_requeue(store: StateStore, record: JobRecord) -> bool:
+    """Send a completed job back to the Phase 4 queue.
+
+    READY_TTS jobs are already queued, so they need no move. The worker
+    picks READY_TTS up, reuses every checkpoint that is still valid,
+    and rebuilds only what the studio changed.
+    """
+
+    if record.status is JobStatus.COMPLETED:
+        store.update_status(
+            record.id,
+            JobStatus.READY_TTS,
+            stage=JobStage.TTS,
+            progress_permille=700,
+            force=True,
+        )
+        return True
+    return False
+
+
+def _studio_drop_tts_blocks(
+    store: StateStore,
+    job_id: str,
+    ordinals: set[int],
+    *,
+    drop_rewrites: bool,
+) -> None:
+    """Invalidate TTS checkpoint blocks so exactly those lines rebuild.
+
+    Timing rewrites of an edited line are dropped too: a rewrite is a
+    shortening of the *old* text and must never be applied to the new
+    one. Retakes keep rewrites because the text is unchanged.
+    """
+
+    checkpoint = store.get_checkpoint(job_id, JobStage.TTS)
+    if checkpoint is None or not isinstance(checkpoint.payload, dict):
+        return
+    payload = dict(checkpoint.payload)
+    blocks = payload.get("blocks", [])
+    if not isinstance(blocks, list):
+        return
+    kept_blocks = [
+        item
+        for item in blocks
+        if not (isinstance(item, dict) and item.get("ordinal") in ordinals)
+    ]
+    changed = len(kept_blocks) != len(blocks)
+    if drop_rewrites:
+        rewrites = payload.get("timing_rewrites", [])
+        if not isinstance(rewrites, list):
+            rewrites = []
+        kept_rewrites = [
+            item
+            for item in rewrites
+            if not (isinstance(item, dict) and item.get("ordinal") in ordinals)
+        ]
+        changed = changed or len(kept_rewrites) != len(rewrites)
+        payload["timing_rewrites"] = kept_rewrites
+    if changed:
+        payload["blocks"] = kept_blocks
+        payload["completed"] = False
+        store.save_checkpoint(job_id, JobStage.TTS, payload)
+
+
 def _adapter_value(value: Any, name: str, default: Any = None) -> Any:
     if is_dataclass(value):
         return asdict(value).get(name, default)
@@ -1721,7 +1977,9 @@ def create_app(
                 "rights_confirmation_required",
                 "Bạn phải xác nhận có quyền tải lên và xử lý nội dung này",
             )
-        if payload.voice is not None and payload.voice_rights_confirmed is not True:
+        if (
+            payload.voice is not None or payload.speaker_voices
+        ) and payload.voice_rights_confirmed is not True:
             raise _upload_error(
                 status.HTTP_403_FORBIDDEN,
                 "voice_rights_confirmation_required",
@@ -2419,6 +2677,330 @@ def create_app(
     def get_job(job_id: str, store: StoreDependency) -> JobResponse:
         try:
             return _job_response(store.get_job(job_id))
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+
+    @application.get("/v1/jobs/{job_id}/studio")
+    def get_studio(job_id: str, store: StoreDependency) -> dict[str, Any]:
+        try:
+            record = store.get_job(job_id)
+            return _studio_view(store, configured_settings, record)
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+
+    @application.put("/v1/jobs/{job_id}/studio/cast")
+    def put_studio_cast(
+        job_id: str, payload: StudioCastRequest, store: StoreDependency
+    ) -> dict[str, Any]:
+        try:
+            record = store.get_job(job_id)
+            _studio_require_editable(record)
+            artifact = _studio_translation(store, configured_settings, job_id)
+            known = {
+                normalize_speaker_label(segment.speaker)
+                for segment in artifact.result.segments
+                if isinstance(segment.speaker, str)
+            }
+            known.discard(None)
+            names = parse_speaker_names(record.spec.get("speaker_names"))
+            raw_map = record.spec.get("speaker_voices")
+            merged: dict[str, dict[str, Any]] = {}
+            if isinstance(raw_map, dict):
+                for label, entry in raw_map.items():
+                    if isinstance(entry, dict):
+                        merged[str(label)] = dict(entry)
+            needs_rights = False
+            for row in payload.speakers:
+                label = normalize_speaker_label(row.speaker)
+                if label is None or label not in known:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "studio_speaker_unknown",
+                            "message": f"Nhân vật không có trong kịch bản: {row.speaker}",
+                            "retryable": False,
+                        },
+                    )
+                if row.display_name is not None:
+                    cleaned = normalize_speaker_label(row.display_name)
+                    if cleaned is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "code": "studio_speaker_names_invalid",
+                                "message": "Tên hiển thị nhân vật không được để trống",
+                                "retryable": False,
+                            },
+                        )
+                    names[label] = cleaned
+                if row.voice_id is None and row.reference_path is None:
+                    merged.pop(label, None)
+                else:
+                    needs_rights = True
+                    merged[label] = {
+                        "voice_id": row.voice_id,
+                        "reference_path": row.reference_path,
+                    }
+            if needs_rights and record.spec.get("voice_rights_confirmed") is not True:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "studio_voice_rights_required",
+                        "message": (
+                            "Job này chưa xác nhận quyền giọng; "
+                            "không thể gán giọng mới trong studio"
+                        ),
+                        "retryable": False,
+                    },
+                )
+            try:
+                voice_map = parse_speaker_voices({"speaker_voices": merged})
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "studio_voice_invalid",
+                        "message": str(exc),
+                        "retryable": False,
+                    },
+                ) from exc
+            record = store.update_spec(
+                job_id,
+                {
+                    "speaker_names": names,
+                    "speaker_voices": voice_map.as_spec(),
+                },
+            )
+            requeued = _studio_requeue(store, record)
+            view = _studio_view(store, configured_settings, record)
+            view["requeued"] = requeued
+            return view
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        except StudioError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": exc.code,
+                    "message": exc.message_vi,
+                    "retryable": False,
+                },
+            ) from exc
+
+    @application.put("/v1/jobs/{job_id}/studio/script/{ordinal}")
+    def put_studio_line(
+        job_id: str, ordinal: int, payload: StudioLineRequest, store: StoreDependency
+    ) -> dict[str, Any]:
+        try:
+            record = store.get_job(job_id)
+            _studio_require_editable(record)
+            artifact = _studio_translation(store, configured_settings, job_id)
+            block_count = len(artifact.result.segments)
+            if not 0 <= ordinal < block_count:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "studio_ordinal_invalid",
+                        "message": f"Câu thoại {ordinal} nằm ngoài kịch bản ({block_count} câu)",
+                        "retryable": False,
+                    },
+                )
+            cleaned = parse_line_overrides(
+                {ordinal: payload.text}, block_count=block_count
+            )[ordinal]
+            overrides = parse_line_overrides(
+                record.spec.get("studio_line_overrides"), block_count=block_count
+            )
+            overrides[ordinal] = cleaned
+            record = store.update_spec(
+                job_id,
+                {
+                    "studio_line_overrides": {
+                        str(key): value for key, value in overrides.items()
+                    }
+                },
+            )
+            _studio_drop_tts_blocks(
+                store, job_id, {ordinal}, drop_rewrites=True
+            )
+            requeued = _studio_requeue(store, record)
+            return {"ordinal": ordinal, "text": cleaned, "requeued": requeued}
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        except StudioError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": exc.code,
+                    "message": exc.message_vi,
+                    "retryable": False,
+                },
+            ) from exc
+
+    @application.post("/v1/jobs/{job_id}/studio/retake")
+    def post_studio_retake(
+        job_id: str, payload: StudioRetakeRequest, store: StoreDependency
+    ) -> dict[str, Any]:
+        try:
+            record = store.get_job(job_id)
+            _studio_require_editable(record)
+            artifact = _studio_translation(store, configured_settings, job_id)
+            block_count = len(artifact.result.segments)
+            seen: list[int] = []
+            for ordinal in payload.ordinals:
+                if (
+                    isinstance(ordinal, bool)
+                    or not isinstance(ordinal, int)
+                    or not 0 <= ordinal < block_count
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "studio_ordinal_invalid",
+                            "message": f"Câu thoại {ordinal} nằm ngoài kịch bản ({block_count} câu)",
+                            "retryable": False,
+                        },
+                    )
+                if ordinal not in seen:
+                    seen.append(ordinal)
+            _studio_drop_tts_blocks(
+                store, job_id, set(seen), drop_rewrites=False
+            )
+            requeued = _studio_requeue(store, record)
+            return {"retaken": seen, "requeued": requeued}
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+
+    @application.put("/v1/jobs/{job_id}/studio/mix")
+    def put_studio_mix(
+        job_id: str, payload: StudioMixRequest, store: StoreDependency
+    ) -> dict[str, Any]:
+        try:
+            record = store.get_job(job_id)
+            _studio_require_editable(record)
+            updates = parse_studio_mix(payload.model_extra or {})
+            if not updates:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "studio_mix_invalid",
+                        "message": "Phải gửi ít nhất một thông số mix",
+                        "retryable": False,
+                    },
+                )
+            merged = parse_studio_mix(record.spec.get("studio_mix"))
+            merged.update(updates)
+            record = store.update_spec(job_id, {"studio_mix": merged})
+            # A mix-only change leaves every TTS block and the timeline
+            # untouched, so the export checkpoint must be cleared or the
+            # old MP4 would simply be reused.
+            store.save_checkpoint(
+                job_id, JobStage.EXPORT, {"completed": False}
+            )
+            requeued = _studio_requeue(store, record)
+            return {
+                "mix": _studio_mix_view(record, configured_settings),
+                "requeued": requeued,
+            }
+        except JobNotFound as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "job_not_found",
+                    "message": "Không tìm thấy job",
+                    "retryable": False,
+                },
+            ) from exc
+        except StudioError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": exc.code,
+                    "message": exc.message_vi,
+                    "retryable": False,
+                },
+            ) from exc
+
+    @application.get("/v1/jobs/{job_id}/studio/lines/{ordinal}/audio")
+    def get_studio_line_audio(
+        job_id: str, ordinal: int, store: StoreDependency
+    ) -> FileResponse:
+        try:
+            record = store.get_job(job_id)
+            checkpoint = store.get_checkpoint(job_id, JobStage.TTS)
+            blocks = (
+                checkpoint.payload.get("blocks", [])
+                if checkpoint is not None
+                and isinstance(checkpoint.payload, dict)
+                else []
+            )
+            if not any(
+                isinstance(item, dict) and item.get("ordinal") == ordinal
+                for item in blocks
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "studio_line_not_synthesized",
+                        "message": "Câu này chưa được tổng hợp nên chưa có audio nghe thử",
+                        "retryable": True,
+                    },
+                )
+            expected = (
+                configured_settings.jobs_dir.resolve(strict=False)
+                / job_id
+                / "tts"
+                / f"block-{ordinal:05d}.wav"
+            )
+            if not expected.is_file():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "studio_line_not_synthesized",
+                        "message": "Không tìm thấy file audio của câu này",
+                        "retryable": True,
+                    },
+                )
+            return FileResponse(
+                expected,
+                media_type="audio/wav",
+                filename=f"{job_id}-line-{ordinal}.wav",
+            )
         except JobNotFound as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

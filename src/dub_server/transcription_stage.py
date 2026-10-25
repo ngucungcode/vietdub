@@ -20,6 +20,12 @@ from .asr import (
     TranscriptionError,
 )
 from .audio_decode import AudioDecodeError, FfmpegAudioDecoder
+from .diarization import (
+    DiarizationError,
+    PyannoteDiarizer,
+    SpeakerDiarizer,
+    assign_speakers,
+)
 from .domain import SpeechRecognizer, SubtitleFormat, TranscriptionResult
 from .model_registry import (
     ModelNotFoundError,
@@ -59,6 +65,7 @@ class AudioDecoder(Protocol):
 ModelResolver = Callable[[Path, Path, str, str], VerifiedModel]
 AudioDecoderFactory = Callable[[], AudioDecoder]
 RecognizerFactory = Callable[[], SpeechRecognizer]
+DiarizerFactory = Callable[[], SpeakerDiarizer]
 
 
 class _StageCancelled(Exception):
@@ -81,6 +88,9 @@ class TranscriptionStage:
         recognizer_factory: RecognizerFactory | None = None,
         model_resolver: ModelResolver = resolve_verified_model,
         shutdown_requested: Callable[[], bool] | None = None,
+        diarizer_factory: DiarizerFactory | None = None,
+        diarization_pipeline_path: Path | None = None,
+        diarization_device: str = "cuda",
     ) -> None:
         model_id = default_asr_model_id.strip()
         if not model_id:
@@ -97,6 +107,16 @@ class TranscriptionStage:
         self._recognizer_factory = recognizer_factory or FasterWhisperRecognizer
         self._model_resolver = model_resolver
         self._shutdown_requested = shutdown_requested or (lambda: False)
+        if diarizer_factory is not None:
+            self._diarizer_factory = diarizer_factory
+        elif diarization_pipeline_path is not None:
+            path = Path(diarization_pipeline_path)
+            device = diarization_device
+            self._diarizer_factory = lambda: PyannoteDiarizer(
+                path, device=device
+            )
+        else:
+            self._diarizer_factory = None
 
     async def run(self, job_id: str) -> JobRecord:
         """Advance one READY_OFFLINE/transcribing job to READY_TRANSLATION."""
@@ -179,6 +199,8 @@ class TranscriptionStage:
                 "Không thể tạo transcript hợp lệ",
                 False,
             )
+        except DiarizationError as error:
+            return self._fail(job_id, error.code, error.message_vi, error.retryable)
         except InvalidTransition:
             current = self._store.get_job(job_id)
             if self._cancelled(current):
@@ -234,6 +256,30 @@ class TranscriptionStage:
                     else None
                 ),
             )
+            if running.spec.get("diarize_speakers") is True:
+                # Subtitle transcripts have no decoded audio yet; decode the
+                # media once so diarization can fill in unlabeled cues.
+                # Cues that already carry a label keep it.
+                media_path = self._required_path(
+                    running.details.get("source_media_path"),
+                    "Không tìm thấy file media nguồn",
+                )
+                selected_media = self._selected_media(running)
+                audio_stream_index = self._optional_non_negative_int(
+                    selected_media.get("audio_stream_index")
+                )
+                decoder = self._audio_decoder_factory()
+                pcm_path = self._job_dir(running.id) / "source-audio-16k.wav"
+                decoded = await decoder.decode(
+                    media_path,
+                    pcm_path,
+                    expected_duration_us=duration_us,
+                    audio_stream_index=audio_stream_index,
+                    cancellation=lambda: self._is_cancel_requested(running.id),
+                )
+                result = await self._maybe_diarize(
+                    running, result, Path(decoded.path)
+                )
         except (TranscriptError, OSError, ValueError) as error:
             if (
                 running.status is JobStatus.READY_OFFLINE
@@ -395,6 +441,7 @@ class TranscriptionStage:
         )
         if self._is_cancel_requested(running.id):
             return self._store.get_job(running.id)
+        result = await self._maybe_diarize(running, result, Path(decoded.path))
         self._update_asr_progress(
             running.id,
             step="finalizing",
@@ -437,6 +484,44 @@ class TranscriptionStage:
             expected_status=JobStatus.TRANSCRIBING,
             progress_permille=max(current.progress_permille, bounded_overall),
             details=details,
+        )
+
+    async def _maybe_diarize(
+        self,
+        running: JobRecord,
+        result: TranscriptionResult,
+        pcm_path: Path,
+    ) -> TranscriptionResult:
+        """Label a transcript with diarization when the job asked for it.
+
+        Runs only when ``spec["diarize_speakers"]`` is true. In the ASR
+        path this is called after transcription but the diarizer
+        releases its pipeline before returning, and the ASR model itself
+        is already done by then, so the two GPU models never coexist.
+        Manual subtitle labels are preserved: only unlabeled segments
+        take a diarized speaker.
+        """
+
+        if running.spec.get("diarize_speakers") is not True:
+            return result
+        if self._diarizer_factory is None:
+            raise DiarizationError(
+                "diarization_unconfigured",
+                "Chưa cấu hình pipeline diarization (DUB_DIARIZATION_PIPELINE_PATH)",
+                retryable=False,
+            )
+        diarizer = self._diarizer_factory()
+        turns = await asyncio.to_thread(
+            diarizer.diarize, pcm_path, duration_us=result.duration_us
+        )
+        segments = assign_speakers(result.segments, turns)
+        return TranscriptionResult(
+            source=result.source,
+            language=result.language,
+            language_probability=result.language_probability,
+            duration_us=result.duration_us,
+            segments=segments,
+            model_id=result.model_id,
         )
 
     async def _publish_and_commit(

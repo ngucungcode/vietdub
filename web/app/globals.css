@@ -2225,3 +2225,88 @@ footer {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Studio lồng tiếng */
+.studio-panel .section-intro {
+  margin-bottom: 24px;
+}
+
+.studio-cast,
+.studio-script {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.studio-cast-row,
+.studio-line {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #303832;
+  border-radius: 2px;
+  background: #0d100f;
+}
+
+@media (min-width: 900px) {
+  .studio-cast-row {
+    grid-template-columns: 1fr 1fr 160px 1.5fr;
+    align-items: end;
+  }
+}
+
+.studio-cast-name {
+  display: grid;
+  gap: 4px;
+}
+
+.studio-cast-name small,
+.studio-line-meta small {
+  color: var(--muted);
+}
+
+.studio-line-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: baseline;
+}
+
+.studio-line-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.studio-line audio {
+  width: 100%;
+}
+
+.studio-mix {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+@media (min-width: 900px) {
+  .studio-mix {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.field textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid #303832;
+  border-radius: 2px;
+  background: #0d100f;
+  color: var(--ink);
+  resize: vertical;
+}
+
+.field textarea:focus {
+  border-color: #56634f;
+  background: #101411;
+  outline: none;
+}

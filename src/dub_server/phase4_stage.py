@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import math
 import os
 import sys
@@ -28,6 +29,8 @@ from .audio_mix_export import (
     MediaExportErrorCode,
     MixSettings,
 )
+from .asr import FasterWhisperRecognizer
+from .domain import SpeechRecognizer
 from .audio_separation import (
     AudioSeparationCancelled,
     AudioSeparationError,
@@ -54,6 +57,14 @@ from .narration import (
     SynthesizedNarration,
     trim_synthesized_narration_silence,
 )
+from .speaker_voices import (
+    SpeakerSynthesizerPool,
+    SpeakerVoice,
+    SpeakerVoiceMap,
+    auto_assign_piper_voices,
+    parse_speaker_voices,
+)
+from .studio import StudioError, effective_studio_mix, parse_line_overrides
 from .narration_artifact import (
     NarrationArtifactError,
     build_srt_cues,
@@ -61,6 +72,7 @@ from .narration_artifact import (
     write_srt_artifact,
     write_timing_report,
 )
+from .qc import build_qc_report
 from .state import InvalidTransition, JobRecord, JobStage, JobStatus, StateStore
 from .timing import (
     NATURAL_MAX_SILENT_BORROW_US,
@@ -88,6 +100,7 @@ SynthesizerFactory = Callable[
 ]
 TimingFitterFactory = Callable[[], FfmpegTimingFitter]
 ExporterFactory = Callable[[], FfmpegAudioMixExporter]
+QcRecognizerFactory = Callable[[], SpeechRecognizer]
 
 
 class TimingTextRewriter(Protocol):
@@ -222,8 +235,13 @@ def build_narration_synthesizer(
     vieneu_entrypoint: Path = Path("/opt/vieneu/vieneu-offline.py"),
     python_executable: str | Path = sys.executable,
     piper_binary: str | Path = "piper",
+    speaker_id: int | None = None,
 ) -> NarrationSynthesizer:
-    """Build VieNeu or Piper using verified local artifacts only."""
+    """Build VieNeu or Piper using verified local artifacts only.
+
+    ``speaker_id`` selects a voice inside a multi-speaker Piper model and
+    is ignored for VieNeu, whose entrypoint serves one voice per process.
+    """
 
     backend = str(model.entry.get("backend", "")).strip().casefold()
     if backend in {"vieneu", "vieneu-tts"}:
@@ -261,6 +279,7 @@ def build_narration_synthesizer(
             model_file,
             binary=selected_piper_binary,
             config_path=config_file,
+            speaker_id=speaker_id,
         )
     raise ModelRegistryError("Backend TTS không được hỗ trợ")
 
@@ -370,6 +389,8 @@ class Phase4Stage:
         exporter_factory: ExporterFactory | None = None,
         model_resolver: ModelResolver = resolve_verified_model,
         shutdown_requested: Callable[[], bool] | None = None,
+        default_asr_model_id: str | None = None,
+        qc_recognizer_factory: QcRecognizerFactory | None = None,
     ) -> None:
         if (
             not default_separation_model_id.strip()
@@ -401,6 +422,8 @@ class Phase4Stage:
         self._python_executable = python_executable
         self._ffmpeg_binary = ffmpeg_binary
         self._ffprobe_binary = ffprobe_binary
+        self._narration_target_lufs = narration_target_lufs
+        self._accompaniment_target_lufs = accompaniment_target_lufs
         self._separation_chunk_seconds = separation_chunk_seconds
         self._separation_context_seconds = separation_context_seconds
         self._separation_batch_size = separation_batch_size
@@ -423,6 +446,13 @@ class Phase4Stage:
                 ),
             )
         )
+        self._default_asr_model_id = (
+            default_asr_model_id.strip()
+            if isinstance(default_asr_model_id, str)
+            and default_asr_model_id.strip()
+            else None
+        )
+        self._qc_recognizer_factory = qc_recognizer_factory
 
     async def run(self, job_id: str) -> JobRecord:
         job = self._store.get_job(job_id)
@@ -772,6 +802,19 @@ class Phase4Stage:
             ),
         )
 
+    def _speaker_voice_map(self, job_id: str) -> SpeakerVoiceMap:
+        """Parse the job's speaker-voice map, failing loudly when malformed."""
+
+        spec = self._store.get_job(job_id).spec
+        try:
+            return parse_speaker_voices(spec if isinstance(spec, Mapping) else None)
+        except ValueError as error:
+            raise NarrationError(
+                "speaker_voices_invalid",
+                f"Bản đồ giọng theo nhân vật không hợp lệ: {error}",
+                retryable=False,
+            ) from error
+
     async def _ensure_narration_blocks(
         self,
         job_id: str,
@@ -789,6 +832,46 @@ class Phase4Stage:
             support_model=support_model,
             timing_profile=timing_profile,
         )
+        voice_map = self._speaker_voice_map(job_id)
+        if (
+            str(model.entry.get("backend") or "").strip().casefold() == "piper"
+            and self._store.get_job(job_id).spec.get("auto_speaker_voices")
+            is True
+        ):
+            # Piper-only: give every speaker without an explicit entry
+            # its own --speaker id, in first-appearance order. The
+            # effective map (not just the explicit one) is what the
+            # checkpoint fingerprint below compares against, so toggling
+            # this flag rebuilds blocks instead of reusing other voices.
+            speakers_in_order: list[str] = []
+            for segment in translation.result.segments:
+                speaker = getattr(segment, "speaker", None)
+                if (
+                    isinstance(speaker, str)
+                    and speaker
+                    and speaker not in speakers_in_order
+                ):
+                    speakers_in_order.append(speaker)
+            voice_map = auto_assign_piper_voices(speakers_in_order, voice_map)
+        # Studio line edits win over the translated text (and over any
+        # timing rewrite of the old text, which the studio endpoint drops
+        # when the edit is saved). A changed line fails the per-block
+        # text-hash check below, so only edited lines re-synthesize.
+        try:
+            line_overrides = parse_line_overrides(
+                self._store.get_job(job_id).spec.get("studio_line_overrides"),
+                block_count=len(translation.result.segments),
+            )
+        except StudioError as error:
+            raise NarrationError(
+                "studio_overrides_invalid", error.message_vi, retryable=False
+            ) from error
+        if payload is not None and (
+            payload.get("speaker_voices") or {}
+        ) != voice_map.as_spec():
+            # The voice map changed since these blocks were synthesized, so
+            # the cached WAVs belong to other voices and must not be reused.
+            payload = None
         if payload is None:
             payload = {
                 "schema_version": 2,
@@ -808,6 +891,7 @@ class Phase4Stage:
                 "block_count": len(translation.result.segments),
                 "timing_rewrites": [],
                 "blocks": [],
+                "speaker_voices": voice_map.as_spec(),
             }
             self._store.save_checkpoint(job_id, JobStage.TTS, payload)
         elif "timing_profile" not in payload or "timing_rewrites" not in payload:
@@ -844,17 +928,21 @@ class Phase4Stage:
                 and 0 <= int(item["ordinal"]) < len(translation.result.segments)
             )
         }
-        synthesizer: NarrationSynthesizer | None = None
+        synthesizer_pool = SpeakerSynthesizerPool(
+            lambda voice: self._build_synthesizer_for_voice(model, support_model, voice)
+        )
         try:
-            if len(blocks_by_ordinal) < len(translation.result.segments):
-                synthesizer = self._synthesizer_factory(model, support_model)
             for ordinal, segment in enumerate(translation.result.segments):
                 self._raise_if_cancelled(job_id)
                 rewrite = rewrites_by_ordinal.get(ordinal)
                 narration_text = (
-                    str(rewrite["text"])
-                    if rewrite is not None
-                    else segment.translated_text
+                    line_overrides[ordinal]
+                    if ordinal in line_overrides
+                    else (
+                        str(rewrite["text"])
+                        if rewrite is not None
+                        else segment.translated_text
+                    )
                 )
                 existing = blocks_by_ordinal.get(ordinal)
                 if existing is not None and await self._valid_raw_block(
@@ -866,8 +954,11 @@ class Phase4Stage:
                     end_us=segment.end_us,
                 ):
                     continue
-                if synthesizer is None:
-                    synthesizer = self._synthesizer_factory(model, support_model)
+                speaker = getattr(segment, "speaker", None)
+                voice = voice_map.for_speaker(
+                    speaker if isinstance(speaker, str) else None
+                )
+                synthesizer = await synthesizer_pool.get(voice)
                 record = await self._synthesize_block(
                     synthesizer,
                     job_id=job_id,
@@ -876,6 +967,11 @@ class Phase4Stage:
                     start_us=segment.start_us,
                     end_us=segment.end_us,
                     timing_profile=timing_profile,
+                )
+                record["speaker"] = speaker
+                record["voice_id"] = voice.voice_id if voice is not None else None
+                record["reference_path"] = (
+                    voice.reference_path if voice is not None else None
                 )
                 blocks_by_ordinal[ordinal] = record
                 payload["blocks"] = [
@@ -904,8 +1000,7 @@ class Phase4Stage:
                     )
                     last_persisted_progress = mapped
         finally:
-            if synthesizer is not None:
-                await synthesizer.close()
+            await synthesizer_pool.close()
         if len(blocks_by_ordinal) != len(translation.result.segments):
             raise NarrationError(
                 "tts_checkpoint_incomplete",
@@ -3116,6 +3211,187 @@ class Phase4Stage:
             size_bytes=size_bytes,
         )
 
+    def _exporter_for_job(self, job_id: str) -> FfmpegAudioMixExporter:
+        """Build the mix exporter, applying the job's studio mix.
+
+        Without a studio mix the stage factory is used unchanged
+        (including any test double). With one, the default ffmpeg
+        exporter is built with the merged loudness/ducking settings.
+        The studio API validates mix values before they reach the
+        spec, so a failure here is a non-retryable export error,
+        not a crash.
+        """
+
+        job = self._store.get_job(job_id)
+        if job.spec.get("studio_mix") is None:
+            return self._exporter_factory()
+        try:
+            mix = effective_studio_mix(
+                job.spec,
+                narration_lufs=self._narration_target_lufs,
+                accompaniment_lufs=self._accompaniment_target_lufs,
+            )
+            settings = MixSettings(
+                narration_lufs=mix["narration_lufs"],
+                accompaniment_lufs=mix["accompaniment_lufs"],
+                true_peak_db=mix.get("true_peak_db", -1.5),
+                ducking_threshold=mix.get("ducking_threshold", 0.04),
+                ducking_ratio=mix.get("ducking_ratio", 3.0),
+                ducking_attack_ms=int(mix.get("ducking_attack_ms", 20)),
+                ducking_release_ms=int(mix.get("ducking_release_ms", 300)),
+            )
+        except (StudioError, ValueError, TypeError) as error:
+            raise MediaExportError(
+                MediaExportErrorCode.EXPORT_FAILED,
+                f"Thông số mix của studio không hợp lệ: {error}",
+                retryable=False,
+            ) from error
+        return FfmpegAudioMixExporter(
+            ffmpeg_binary=self._ffmpeg_binary,
+            ffprobe_binary=self._ffprobe_binary,
+            settings=settings,
+        )
+
+    async def _run_qc(
+        self,
+        job_id: str,
+        *,
+        translation: TranslationArtifact,
+        fitted_blocks: Sequence[FittedNarrationBlock],
+        timing_payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Best-effort AI listen-back. Never fails the job.
+
+        Runs ASR over the clean narration timeline and scores each
+        fitted line against what was heard. Any failure (no ASR model
+        installed, recognizer error, missing timeline) only appends a
+        warning and returns None, so a dub is never blocked by its own
+        quality check. A report for the current timeline is reused
+        instead of re-running ASR, so mix-only re-runs stay cheap.
+        """
+
+        if self._is_cancel_requested(job_id):
+            return None
+        job = self._store.get_job(job_id)
+        if job.spec.get("qc_enabled") is False:
+            return None
+        timeline_sha = str(timing_payload.get("timeline_sha256") or "")
+        report_path = self._job_dir(job_id) / "qc-report.json"
+        if timeline_sha and report_path.is_file():
+            try:
+                existing = json.loads(
+                    report_path.read_text(encoding="utf-8")
+                )
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("timeline_sha256") == timeline_sha
+                    and isinstance(existing.get("summary"), dict)
+                ):
+                    return {
+                        "path": str(report_path),
+                        "sha256": await asyncio.to_thread(
+                            self._file_sha256, report_path
+                        ),
+                        "summary": existing["summary"],
+                    }
+            except (OSError, ValueError):
+                pass
+        models = job.spec.get("models")
+        asr_model_id = None
+        if isinstance(models, dict):
+            raw_asr = models.get("asr")
+            if isinstance(raw_asr, str) and raw_asr.strip():
+                asr_model_id = raw_asr.strip()
+        if asr_model_id is None:
+            asr_model_id = self._default_asr_model_id
+        if not asr_model_id:
+            self._store.append_warning(
+                job_id,
+                "qc_skipped",
+                "Không có model ASR nên bỏ qua bước AI nghe lại",
+            )
+            return None
+        timeline_raw = timing_payload.get("timeline_path")
+        timeline_path = (
+            Path(str(timeline_raw))
+            if isinstance(timeline_raw, str) and timeline_raw
+            else None
+        )
+        if timeline_path is None or not timeline_path.is_file():
+            self._store.append_warning(
+                job_id,
+                "qc_skipped",
+                "Không tìm thấy timeline thuyết minh nên bỏ qua bước AI nghe lại",
+            )
+            return None
+        try:
+            verified = await asyncio.to_thread(
+                self._model_resolver,
+                self._models_lock_path,
+                self._models_dir,
+                asr_model_id,
+                "asr",
+            )
+        except (
+            ModelNotFoundError,
+            ModelVerificationError,
+            ModelRegistryError,
+        ) as error:
+            self._store.append_warning(
+                job_id,
+                "qc_skipped",
+                f"Model ASR chưa cài đặt nên bỏ qua bước AI nghe lại: {error}",
+            )
+            return None
+        if self._qc_recognizer_factory is not None:
+            recognizer = self._qc_recognizer_factory()
+        else:
+            recognizer = FasterWhisperRecognizer(
+                device=self._separation_device
+            )
+
+        def qc_progress(end_us: int, segment_count: int) -> None:
+            if self._is_cancel_requested(job_id):
+                raise _StageCancelled()
+
+        try:
+            heard = await asyncio.to_thread(
+                recognizer.transcribe,
+                timeline_path,
+                model_path=Path(verified.path),
+                model_id=asr_model_id,
+                compute_type=(
+                    "float16" if self._separation_device == "cuda" else "int8"
+                ),
+                language="vi",
+                duration_us=translation.result.duration_us,
+                on_progress=qc_progress,
+            )
+        except _StageCancelled:
+            raise
+        except Exception as error:
+            self._store.append_warning(
+                job_id,
+                "qc_failed",
+                f"AI nghe lại thất bại: {error}",
+            )
+            return None
+        report = build_qc_report(fitted_blocks, heard.segments)
+        report["timeline_sha256"] = timeline_sha
+        tmp_path = report_path.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, report_path)
+        return {
+            "path": str(report_path),
+            "sha256": await asyncio.to_thread(
+                self._file_sha256, report_path
+            ),
+            "summary": report["summary"],
+        }
+
     async def _export(
         self,
         job_id: str,
@@ -3171,7 +3447,7 @@ class Phase4Stage:
                 detail_updates={"phase4_step": "export"},
                 force_reset=current.status is JobStatus.VERIFYING,
             )
-            exporter = self._exporter_factory()
+            exporter = self._exporter_for_job(job_id)
             output_path = self._output_dir / f"{job_id}.mp4"
             exported = await exporter.export(
                 source_media,
@@ -3215,6 +3491,16 @@ class Phase4Stage:
             fitted_blocks=fitted_blocks,
             timing_payload=timing.payload,
         )
+        qc = await self._run_qc(
+            job_id,
+            translation=translation,
+            fitted_blocks=fitted_blocks,
+            timing_payload=timing.payload,
+        )
+        if qc is not None:
+            result["qc_report_path"] = qc["path"]
+            result["qc_report_sha256"] = qc["sha256"]
+            result["qc_summary"] = qc["summary"]
         self._store.save_checkpoint(
             job_id,
             JobStage.EXPORT,
@@ -3385,6 +3671,41 @@ class Phase4Stage:
             vieneu_entrypoint=self._vieneu_entrypoint,
             python_executable=self._python_executable,
         )
+
+    def _build_synthesizer_for_voice(
+        self,
+        model: VerifiedModel,
+        support_model: VerifiedModel | None,
+        voice: SpeakerVoice | None,
+    ) -> NarrationSynthesizer:
+        """Build the synthesizer for one character's voice selection.
+
+        A Piper voice with an integer ``voice_id`` becomes that model's
+        ``--speaker`` id, which Piper honors per process. Every other
+        selection falls back to the job's default synthesizer: the VieNeu
+        entrypoint serves one voice per process and takes no per-request
+        voice, so a VieNeu character voice is recorded on the block
+        (``voice_id``/``reference_path``) but still spoken in the
+        entrypoint's voice until the entrypoint gains a voice parameter.
+        Returning the default synthesizer here is deliberate, not a
+        silent misroute: the requested voice stays visible in the
+        checkpoint for exactly that follow-up.
+        """
+
+        backend = str(model.entry.get("backend", "")).strip().casefold()
+        if (
+            voice is not None
+            and backend == "piper"
+            and voice.piper_speaker_id is not None
+        ):
+            return build_narration_synthesizer(
+                model,
+                support_model,
+                vieneu_entrypoint=self._vieneu_entrypoint,
+                python_executable=self._python_executable,
+                speaker_id=voice.piper_speaker_id,
+            )
+        return self._synthesizer_factory(model, support_model)
 
     def _source_media(self, job: JobRecord) -> Path:
         raw = job.details.get("source_media_path")
@@ -3562,6 +3883,7 @@ def build_phase4_stage(
         timing_rewrite_max_attempts=settings.timing_rewrite_max_attempts,
         narration_target_lufs=settings.narration_target_lufs,
         accompaniment_target_lufs=-24.0,
+        default_asr_model_id=settings.default_asr_model_id,
         shutdown_requested=shutdown.is_set,
     )
 

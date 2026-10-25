@@ -1460,6 +1460,44 @@ class StateStore:
             connection.close()
         return self.get_job(job_id)
 
+    def update_spec(
+        self,
+        job_id: str,
+        updates: Mapping[str, Any],
+    ) -> JobRecord:
+        """Merge top-level keys into a job's spec without moving status.
+
+        Studio edits (cast, script overrides, mix) go through here: the
+        pipeline stages read the spec when they run, but never write it,
+        so a spec change cannot race a running stage's own writes.
+        """
+
+        connection = self._connect()
+        now = _utc_now()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT spec_json FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise JobNotFound(f"Không tìm thấy job: {job_id}")
+            spec = _decode(row["spec_json"])
+            spec.update(dict(updates))
+            connection.execute(
+                """
+                UPDATE jobs SET spec_json = ?, revision = revision + 1,
+                    updated_at = ? WHERE id = ?
+                """,
+                (_encode(spec), now, job_id),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_job(job_id)
+
     def request_cancel(self, job_id: str) -> JobRecord:
         current = self.get_job(job_id)
         if current.status in TERMINAL_STATUSES:

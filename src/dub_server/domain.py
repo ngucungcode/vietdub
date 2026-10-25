@@ -19,6 +19,25 @@ class MediaKind(StrEnum):
     SERIES = "series"
 
 
+def normalize_speaker_label(value: object | None) -> str | None:
+    """Normalize a speaker/character label, or ``None`` when it is absent.
+
+    Whitespace is collapsed and the label is capped at 120 characters so a
+    stray subtitle line cannot smuggle a paragraph into a speaker key. The
+    same function normalizes labels parsed from subtitles and keys supplied
+    in a job's speaker-voice map, so the two sides always match.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Nhãn nhân vật phải là chuỗi")
+    normalized = " ".join(value.split())
+    if not normalized:
+        return None
+    return normalized[:120]
+
+
 @dataclass(frozen=True, slots=True)
 class MediaQuery:
     query: str
@@ -123,13 +142,22 @@ class MediaAsset:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptSegment:
-    """One normalized transcript segment with integer microsecond timing."""
+    """One normalized transcript segment with integer microsecond timing.
+
+    ``speaker`` is an optional character label parsed from a subtitle file
+    (for example an ``NAME:`` prefix in SRT or the ``Name`` field in ASS).
+    It is metadata only: it never becomes part of the spoken text, and it
+    survives translation so the TTS stage can pick a voice per character.
+    ``None`` means the speaker is unknown; labels are whitespace-normalized
+    so ``"  An Na  "`` and ``"An Na"`` refer to the same character.
+    """
 
     start_us: int
     end_us: int
     text: str
     average_log_probability: float | None = None
     no_speech_probability: float | None = None
+    speaker: str | None = None
 
     def __post_init__(self) -> None:
         normalized_text = " ".join(self.text.split())
@@ -138,6 +166,7 @@ class TranscriptSegment:
         if not normalized_text:
             raise ValueError("Nội dung transcript không được để trống")
         object.__setattr__(self, "text", normalized_text)
+        object.__setattr__(self, "speaker", normalize_speaker_label(self.speaker))
 
 
 @dataclass(frozen=True, slots=True)

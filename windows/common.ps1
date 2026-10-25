@@ -139,8 +139,16 @@ function Initialize-DubWindowsEnvironment {
         $env:DUB_TIGER_SOURCE_DIR,
         (Join-Path $nativeRoot "opt\vieneu\source\src")
     )
+    # Khong ke thua PYTHONPATH cua may nguoi dung neu no tro toi site-packages
+    # cua Python he thong: pip check va import se nhan ban he thong (moi hon,
+    # khong khop lock) thay vi ban trong venv, gay loi pip check.
     if (-not [string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
-        $pythonPathParts += $env:PYTHONPATH
+        foreach ($inheritedPart in ($env:PYTHONPATH -split [IO.Path]::PathSeparator)) {
+            $trimmedPart = $inheritedPart.TrimEnd('\', '/')
+            if ($trimmedPart -ne '' -and $trimmedPart -notmatch 'site-packages$') {
+                $pythonPathParts += $trimmedPart
+            }
+        }
     }
     $env:PYTHONPATH = $pythonPathParts -join [IO.Path]::PathSeparator
 

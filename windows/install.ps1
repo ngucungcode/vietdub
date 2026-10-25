@@ -496,6 +496,19 @@ Copy-Item -LiteralPath $entrypointSource -Destination $env:DUB_VIENEU_ENTRYPOINT
 if (-not (Test-Path -LiteralPath $context.VenvPython -PathType Leaf)) {
     Invoke-Checked $pythonExecutable "-m" "venv" $env:DUB_VENV_DIR
 }
+$venvRepaired = $false
+$pyvenvCfgPath = Join-Path $env:DUB_VENV_DIR "pyvenv.cfg"
+if (Test-Path -LiteralPath $pyvenvCfgPath -PathType Leaf) {
+    # Venv bi bat include-system-site-packages se nhin thay package cua Python
+    # he thong: pip bo qua cai dat trong venv, pip check bao conflict voi ban
+    # he thong. Tat co nay va cai lai lock torch de lap day package tung bi bo qua.
+    $pyvenvCfgContent = [IO.File]::ReadAllText($pyvenvCfgPath)
+    if ($pyvenvCfgContent -match '(?m)^include-system-site-packages\s*=\s*true\s*$') {
+        $pyvenvCfgContent = $pyvenvCfgContent -replace '(?m)^include-system-site-packages\s*=\s*true\s*$', 'include-system-site-packages = false'
+        [IO.File]::WriteAllText($pyvenvCfgPath, $pyvenvCfgContent)
+        $venvRepaired = $true
+    }
+}
 $python = $context.VenvPython
 Invoke-Checked $python "-m" "pip" "install" "--disable-pip-version-check" "--upgrade" "pip"
 $installedTorchRuntime = Invoke-DubNativeProbe -FilePath $python -Arguments @(
@@ -506,7 +519,7 @@ if ($selectedComputeMode -eq "gpu") {
 } else {
     $torchProfile = "cpu"
 }
-if ($installedTorchRuntime -ne ($torchProfile + ";2.10.0")) {
+if ($venvRepaired -or ($installedTorchRuntime -ne ($torchProfile + ";2.10.0"))) {
     Invoke-Checked $python "-m" "pip" "uninstall" "-y" "torch"
     $torchIndex = "https://download.pytorch.org/whl/$torchProfile"
     $torchLock = Join-Path $projectRoot ("requirements\torch-" + $torchProfile + ".lock")

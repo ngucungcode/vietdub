@@ -332,9 +332,12 @@ async def process_next_translation_job(
     """Process at most one ready/resumable translation job.
 
     ``translation_backend`` routes jobs by their spec: the offline worker
-    passes ``"local"`` (it must never claim an OpenAI job, whose API call
-    its network guard would block), while the standalone OpenAI runner
-    passes ``"openai"``. ``None`` keeps the old unfiltered behaviour.
+    passes ``"local"`` (it must never claim an API job, whose network
+    call its network guard would block), while the standalone API runner
+    passes ``"api"``. ``"api"`` (and the legacy ``"openai"`` value)
+    matches every API-backend job, whether it targets api.openai.com or
+    a custom OpenAI-compatible base URL. ``None`` keeps the old
+    unfiltered behaviour.
     """
 
     records = store.list_jobs(_TRANSLATION_QUEUE, limit=100)
@@ -343,9 +346,12 @@ async def process_next_translation_job(
     record = None
     for candidate in records:
         backend = candidate.spec.get("translation_backend") or "local"
-        if translation_backend == "local" and backend == "openai":
+        if translation_backend == "local" and backend in {"openai", "api"}:
             continue
-        if translation_backend == "openai" and backend != "openai":
+        if translation_backend in {"openai", "api"} and backend not in {
+            "openai",
+            "api",
+        }:
             continue
         record = candidate
         break

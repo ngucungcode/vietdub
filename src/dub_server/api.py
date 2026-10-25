@@ -79,7 +79,12 @@ from .gpu import (
     read_gpu_report,
 )
 from .media_probe import FfprobeMediaProbe, MediaProbe, MediaProbeError
-from .openai_translation import OpenAITranslator, read_openai_api_key
+from .openai_translation import (
+    OpenAITranslator,
+    is_loopback_api_base_url,
+    normalize_api_base_url,
+    read_openai_api_key,
+)
 from .opensubtitles import (
     DEFAULT_OPENSUBTITLES_API_ROOT,
     normalize_opensubtitles_api_root,
@@ -344,17 +349,35 @@ class UploadCreateRequest(BaseModel):
     # AI listen-back after Phase 4 (see docs/studio.md). Best-effort:
     # when False the job skips it entirely.
     qc_enabled: bool = True
-    # Translation backend (see docs/openai-translation.md). "local" uses
-    # the on-device Gemma model; "openai" leaves the job at
-    # READY_TRANSLATION for the API process (endpoint
-    # POST /v1/jobs/{id}/translate-openai, or the standalone
-    # scripts/translate-openai.py) because the offline worker cannot
-    # reach the network. Stored verbatim into the job spec.
-    translation_backend: Literal["local", "openai"] = "local"
-    # OpenAI model id for the openai backend (default gpt-4o-mini).
-    # Ignored for local jobs. At finalize time the backend normalizes
-    # spec["models"]["translation"] to "mt-openai-<model>".
+    # Translation backend (see docs/custom-api-translation.md). "local"
+    # uses the on-device Gemma model; "openai" and "api" both leave the
+    # job at READY_TRANSLATION for the API process (endpoint
+    # POST /v1/jobs/{id}/translate-openai or .../translate-api, or the
+    # standalone scripts/translate-openai.py) because the offline worker
+    # cannot reach the network. "openai" is the legacy value: it always
+    # targets api.openai.com with a default model of gpt-4o-mini.
+    # "api" is the generic OpenAI-compatible backend: it requires
+    # translation_api_base_url and an explicit provider model id.
+    # Stored verbatim into the job spec.
+    translation_backend: Literal["local", "openai", "api"] = "local"
+    # Model id for the API backends. Ignored for local jobs. At finalize
+    # time the backend normalizes spec["models"]["translation"] to
+    # "mt-openai-<model>" (openai) or "mt-api-<model>" (api).
     translation_model: str | None = Field(default=None, max_length=200)
+    # Base URL for the "api" backend only, e.g. https://api.deepseek.com
+    # or http://localhost:1234 (LM Studio). Normalized at finalize time
+    # (a trailing /v1 or /v1/chat/completions is stripped, because the
+    # translator appends /v1/chat/completions itself). Must be empty
+    # for "openai" and "local" jobs.
+    translation_api_base_url: str | None = Field(default=None, max_length=500)
+    # Per-job separation tuning (see docs/profile-6gb.md). When set, the
+    # Phase 4 stage uses these instead of the server-wide settings for
+    # this job only; when None, the server defaults apply. This is what
+    # lets the 6 GB preset shrink TIGER's chunk without touching the
+    # server configuration for other jobs.
+    separation_chunk_seconds: float | None = Field(default=None, ge=12.0, le=600.0)
+    separation_context_seconds: float | None = Field(default=None, ge=0.0, le=12.0)
+    separation_batch_size: int | None = Field(default=None, ge=1, le=16)
     # Final-review gate (see docs/studio.md): when True, Phase 4 stops
     # at AWAITING_APPROVAL with a preview instead of COMPLETED, and the
     # finished file is only released after POST .../review/approve.
@@ -2518,10 +2541,19 @@ def create_app(
                     ),
                 }
             )
-            # Normalize the OpenAI translation choice so the translation
+            # Normalize the API translation choice so the translation
             # stage, the worker filter and the API runner all agree on
             # one model id (mirrors scripts/translate-openai.py).
-            if spec.get("translation_backend") == "openai":
+            backend = spec.get("translation_backend")
+            if backend == "openai":
+                raw_base_url = spec.get("translation_api_base_url")
+                if isinstance(raw_base_url, str) and raw_base_url.strip():
+                    raise _upload_error(
+                        status.HTTP_400_BAD_REQUEST,
+                        "translation_api_base_url_invalid",
+                        "Backend OpenAI dùng URL mặc định của OpenAI; "
+                        "chọn backend API tùy chỉnh để nhập URL khác",
+                    )
                 raw_model = spec.get("translation_model")
                 model = raw_model.strip() if isinstance(raw_model, str) else ""
                 if not model:
@@ -2538,8 +2570,49 @@ def create_app(
                     spec["models"] = models
                 models["translation"] = f"mt-openai-{model}"
                 spec["translation_model"] = model
+                spec["translation_api_base_url"] = None
+            elif backend == "api":
+                raw_base_url = spec.get("translation_api_base_url")
+                if not isinstance(raw_base_url, str) or not raw_base_url.strip():
+                    raise _upload_error(
+                        status.HTTP_400_BAD_REQUEST,
+                        "translation_api_base_url_invalid",
+                        "Backend API tùy chỉnh cần nhập API base URL, "
+                        "ví dụ https://api.deepseek.com hoặc http://localhost:1234",
+                    )
+                try:
+                    base_url = normalize_api_base_url(raw_base_url)
+                except ValueError as exc:
+                    raise _upload_error(
+                        status.HTTP_400_BAD_REQUEST,
+                        "translation_api_base_url_invalid",
+                        f"API base URL không hợp lệ: {exc}",
+                    ) from exc
+                raw_model = spec.get("translation_model")
+                model = raw_model.strip() if isinstance(raw_model, str) else ""
+                if not model or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._\-/:@]*", model
+                ):
+                    raise _upload_error(
+                        status.HTTP_400_BAD_REQUEST,
+                        "translation_model_invalid",
+                        "Backend API tùy chỉnh cần nhập tên model của nhà "
+                        "cung cấp, ví dụ deepseek-chat hoặc tên model local",
+                    )
+                models = spec.get("models")
+                if not isinstance(models, dict):
+                    models = {}
+                    spec["models"] = models
+                # Provider model ids may contain "/" (OpenRouter) or ":"
+                # (Ollama tags); the internal model id must stay a plain
+                # slug, so those characters become "-".
+                slug = re.sub(r"[^A-Za-z0-9._-]+", "-", model).strip("-") or "model"
+                models["translation"] = f"mt-api-{slug}"
+                spec["translation_model"] = model
+                spec["translation_api_base_url"] = base_url
             else:
                 spec["translation_model"] = None
+                spec["translation_api_base_url"] = None
             acquisition_checkpoint = {
                 "source": "local_upload",
                 "selected_media": selected_media,
@@ -3102,14 +3175,20 @@ def create_app(
             ) from exc
 
     @application.get("/v1/settings/openai-key")
+    @application.get("/v1/settings/api-key")
     def get_openai_key_status() -> dict[str, Any]:
-        """Report only whether an OpenAI key is stored, never the key."""
+        """Report only whether an API key is stored, never the key.
+
+        Both paths share one stored key: the old /openai-key path is
+        kept for existing dashboards, /api-key is the generic name.
+        """
 
         return {"configured": _openai_key_configured(configured_settings)}
 
     @application.put("/v1/settings/openai-key")
+    @application.put("/v1/settings/api-key")
     def put_openai_key(body: OpenAiKeyRequest) -> dict[str, Any]:
-        """Store an OpenAI key server-side (0600 file). Write-only."""
+        """Store an API key server-side (0600 file). Write-only."""
 
         key = body.key.strip()
         if not key or any(character.isspace() for character in key):
@@ -3137,6 +3216,7 @@ def create_app(
         return {"configured": True}
 
     @application.delete("/v1/settings/openai-key")
+    @application.delete("/v1/settings/api-key")
     def delete_openai_key() -> dict[str, Any]:
         _openai_key_path(configured_settings).unlink(missing_ok=True)
         return {"configured": False}
@@ -3145,18 +3225,26 @@ def create_app(
         "/v1/jobs/{job_id}/translate-openai",
         status_code=status.HTTP_202_ACCEPTED,
     )
+    @application.post(
+        "/v1/jobs/{job_id}/translate-api",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
     async def translate_job_openai(
         job_id: str,
         background_tasks: BackgroundTasks,
         store: StoreDependency,
     ) -> dict[str, Any]:
-        """Translate an openai-backend job via the API, outside the worker.
+        """Translate an API-backend job via its provider, outside the worker.
 
         The offline worker never claims these jobs (see worker.py), so
         the API process — which has no network guard — runs the
         translation in the background. The job then continues through
         Phase 4 on its own. A stale TRANSLATING job (API restarted
         mid-run) can be resumed here; a live run cannot be doubled.
+        Works for both backends: "openai" (api.openai.com) and "api"
+        (the job's stored custom base URL). A loopback base URL needs
+        no stored key — local servers usually ignore the auth header,
+        so a dummy "local" key is used instead of failing the job.
         """
 
         try:
@@ -3182,7 +3270,8 @@ def create_app(
                     "retryable": True,
                 },
             )
-        if (record.spec.get("translation_backend") or "local") != "openai":
+        job_backend = record.spec.get("translation_backend") or "local"
+        if job_backend not in {"openai", "api"}:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -3202,33 +3291,69 @@ def create_app(
             )
         model = record.spec.get("translation_model")
         model = model.strip() if isinstance(model, str) and model.strip() else "gpt-4o-mini"
+        if job_backend == "api":
+            raw_base_url = record.spec.get("translation_api_base_url")
+            if not isinstance(raw_base_url, str) or not raw_base_url.strip():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "translation_api_base_url_missing",
+                        "message": "Job API tùy chỉnh này không có base URL đã lưu",
+                        "retryable": False,
+                    },
+                )
+            try:
+                base_url = normalize_api_base_url(raw_base_url)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "translation_api_base_url_invalid",
+                        "message": f"Base URL đã lưu của job không hợp lệ: {exc}",
+                        "retryable": False,
+                    },
+                ) from exc
+            model_id = (record.spec.get("models") or {}).get("translation") or (
+                f"mt-api-{re.sub(r'[^A-Za-z0-9._-]+', '-', model).strip('-') or 'model'}"
+            )
+        else:
+            base_url = "https://api.openai.com"
+            model_id = f"mt-openai-{model}"
         key_path = _openai_key_path(configured_settings)
         try:
             api_key = read_openai_api_key(key_path if key_path.is_file() else None)
         except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "openai_api_key_missing",
-                    "message": (
-                        "Chưa có API key OpenAI: nhập key ở phần Cài đặt "
-                        "trước khi dịch qua API"
-                    ),
-                    "retryable": False,
-                },
-            ) from exc
+            # Loopback providers (LM Studio, Ollama, vLLM on this machine)
+            # normally ignore the Authorization header, so a missing key
+            # must not block a local job. Remote providers still fail
+            # here with the same code the frontend already handles.
+            if not is_loopback_api_base_url(base_url):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "openai_api_key_missing",
+                        "message": (
+                            "Chưa có API key: nhập key ở phần Cài đặt "
+                            "trước khi dịch qua API"
+                        ),
+                        "retryable": False,
+                    },
+                ) from exc
+            api_key = "local"
 
         _OPENAI_TRANSLATION_RUNNING.add(job_id)
 
         async def _run_translation() -> None:
             try:
-                translator = OpenAITranslator(api_key=api_key, model=model)
+                translator = OpenAITranslator(
+                    api_key=api_key, model=model, base_url=base_url
+                )
                 try:
                     stage = TranslationStage(
                         models_lock_path=configured_settings.models_lock_path,
                         models_dir=configured_settings.models_dir,
                         jobs_dir=configured_settings.jobs_dir,
-                        default_translation_model_id=f"mt-openai-{model}",
+                        default_translation_model_id=model_id,
                         store=store,
                         openai_translator=translator,
                     )
@@ -3239,7 +3364,12 @@ def create_app(
                 _OPENAI_TRANSLATION_RUNNING.discard(job_id)
 
         background_tasks.add_task(_run_translation)
-        return {"job_id": job_id, "status": "translating", "model": model}
+        return {
+            "job_id": job_id,
+            "status": "translating",
+            "model": model,
+            "base_url": base_url,
+        }
 
     @application.get("/v1/jobs/{job_id}/review")
     def get_review(job_id: str, store: StoreDependency) -> dict[str, Any]:

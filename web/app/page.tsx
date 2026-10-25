@@ -102,6 +102,10 @@ type Job = {
     voice?: { voice_id?: string | null; reference_path?: string | null } | null;
     translation_backend?: string;
     translation_model?: string | null;
+    translation_api_base_url?: string | null;
+    separation_chunk_seconds?: number | null;
+    separation_context_seconds?: number | null;
+    separation_batch_size?: number | null;
     require_final_approval?: boolean;
     speaker_voices?: Record<string, { voice_id?: string | null; reference_path?: string | null }>;
     diarize_speakers?: boolean;
@@ -332,6 +336,19 @@ const modelStages = [
   ["mt", "Dịch sang tiếng Việt"],
   ["separation", "Tách thoại / nhạc nền"],
   ["tts", "Giọng thuyết minh"],
+] as const;
+
+// Nhà cung cấp API tương thích OpenAI hay gặp. Chọn một preset chỉ điền
+// sẵn base URL (và model khi nhà cung cấp có model mặc định rõ ràng);
+// bạn vẫn sửa tay được cả hai ô sau đó. Server tự bỏ hậu tố /v1 hay
+// /v1/chat/completions nếu bạn dán cả đường dẫn đầy đủ.
+const apiProviderPresets = [
+  { value: "custom", label: "Tự nhập URL", baseUrl: "", model: "" },
+  { value: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-chat" },
+  { value: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "" },
+  { value: "groq", label: "Groq", baseUrl: "https://api.groq.com/openai/v1", model: "" },
+  { value: "lmstudio", label: "LM Studio (chạy trên máy này)", baseUrl: "http://localhost:1234", model: "" },
+  { value: "ollama", label: "Ollama (chạy trên máy này)", baseUrl: "http://localhost:11434/v1", model: "" },
 ] as const;
 
 const nonActiveStatuses = new Set(["completed", "failed", "cancelled", "paused"]);
@@ -885,8 +902,13 @@ export default function Home() {
     ducking_threshold: "",
     true_peak_db: "",
   });
-  const [translationBackend, setTranslationBackend] = useState<"local" | "openai">("local");
+  const [translationBackend, setTranslationBackend] = useState<"local" | "openai" | "api">("local");
   const [openaiModel, setOpenaiModel] = useState("");
+  const [translationApiBaseUrl, setTranslationApiBaseUrl] = useState("");
+  const [apiProvider, setApiProvider] = useState<string>("custom");
+  const [separationChunkSeconds, setSeparationChunkSeconds] = useState("");
+  const [separationContextSeconds, setSeparationContextSeconds] = useState("");
+  const [separationBatchSize, setSeparationBatchSize] = useState("");
   const [requireFinalApproval, setRequireFinalApproval] = useState(true);
   const [speakerVoicesText, setSpeakerVoicesText] = useState("");
   const [diarizeSpeakers, setDiarizeSpeakers] = useState(false);
@@ -1162,7 +1184,7 @@ export default function Home() {
     let createdUploadId: string | null = null;
     const models = {
       asr: selectedModels.asr || null,
-      translation: translationBackend === "openai" ? null : (selectedModels.mt || null),
+      translation: translationBackend === "local" ? (selectedModels.mt || null) : null,
       separation: selectedModels.separation || null,
       tts: selectedModels.tts || null,
     };
@@ -1197,7 +1219,11 @@ export default function Home() {
             voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
             glossary,
             translation_backend: translationBackend,
-            translation_model: translationBackend === "openai" ? (openaiModel.trim() || null) : null,
+            translation_model: translationBackend === "local" ? null : (openaiModel.trim() || null),
+            translation_api_base_url: translationBackend === "api" ? (translationApiBaseUrl.trim() || null) : null,
+            separation_chunk_seconds: separationChunkSeconds.trim() ? Number(separationChunkSeconds) : null,
+            separation_context_seconds: separationContextSeconds.trim() ? Number(separationContextSeconds) : null,
+            separation_batch_size: separationBatchSize.trim() ? Number(separationBatchSize) : null,
             require_final_approval: requireFinalApproval,
             speaker_voices: speakerVoices,
             diarize_speakers: diarizeSpeakers,
@@ -1214,6 +1240,10 @@ export default function Home() {
           glossary: uploadRequest.glossary,
           translation_backend: uploadRequest.translation_backend,
           translation_model: uploadRequest.translation_model,
+          translation_api_base_url: uploadRequest.translation_api_base_url,
+          separation_chunk_seconds: uploadRequest.separation_chunk_seconds,
+          separation_context_seconds: uploadRequest.separation_context_seconds,
+          separation_batch_size: uploadRequest.separation_batch_size,
           require_final_approval: uploadRequest.require_final_approval,
           speaker_voices: uploadRequest.speaker_voices,
           diarize_speakers: uploadRequest.diarize_speakers,
@@ -1709,7 +1739,7 @@ export default function Home() {
   async function saveOpenAiKey(event: FormEvent) {
     event.preventDefault();
     if (!openaiKeyInput.trim()) {
-      setSettingsProblem("Hãy nhập key OpenAI trước khi lưu.");
+      setSettingsProblem("Hãy nhập key API trước khi lưu.");
       return;
     }
     setSettingsBusy("openai-key");
@@ -1721,29 +1751,61 @@ export default function Home() {
         body: JSON.stringify({ key: openaiKeyInput.trim() }),
       });
       setOpenaiKeyInput("");
-      setSettingsNotice("Đã lưu key OpenAI phía máy chủ. Key không bao giờ hiển thị lại trên dashboard.");
+      setSettingsNotice("Đã lưu key API phía máy chủ. Key không bao giờ hiển thị lại trên dashboard.");
       await refreshOpenAiKey();
     } catch (error) {
-      setSettingsProblem(messageOf(error, "Không thể lưu key OpenAI."));
+      setSettingsProblem(messageOf(error, "Không thể lưu key API."));
     } finally {
       setSettingsBusy(null);
     }
   }
 
   async function removeOpenAiKey() {
-    if (!window.confirm("Xóa key OpenAI đã lưu trên máy chủ? Job dịch API sau đó sẽ báo thiếu key.")) return;
+    if (!window.confirm("Xóa key API đã lưu trên máy chủ? Job dịch API ngoài (không phải local) sau đó sẽ báo thiếu key.")) return;
     setSettingsBusy("openai-key-delete");
     setSettingsProblem(null);
     setSettingsNotice(null);
     try {
       await api<{ configured: boolean }>("/settings/openai-key", { method: "DELETE" });
-      setSettingsNotice("Đã xóa key OpenAI.");
+      setSettingsNotice("Đã xóa key API.");
       await refreshOpenAiKey();
     } catch (error) {
-      setSettingsProblem(messageOf(error, "Không thể xóa key OpenAI."));
+      setSettingsProblem(messageOf(error, "Không thể xóa key API."));
     } finally {
       setSettingsBusy(null);
     }
+  }
+
+  function applyApiProviderPreset(value: string) {
+    setApiProvider(value);
+    const preset = apiProviderPresets.find((item) => item.value === value);
+    if (!preset) return;
+    if (preset.baseUrl) setTranslationApiBaseUrl(preset.baseUrl);
+    if (preset.model) setOpenaiModel(preset.model);
+  }
+
+  // Cấu hình chuẩn cho máy 6 GB VRAM (xem docs/profile-6gb.md): ASR
+  // nhỏ nhất để không sát nút VRAM, TIGER tách theo chunk 30 s thay vì
+  // 120 s mặc định, TTS VieNeu v2, và dịch qua API (0 VRAM) thay vì
+  // Gemma local. Nút này không đụng tới key hay model local của bạn;
+  // nếu chưa có API, chọn preset LM Studio / Ollama ở dưới hoặc đổi
+  // backend về Cục bộ + model Gemma E2B trước khi tạo job.
+  function applySixGbPreset() {
+    setSelectedModels((current) => ({
+      ...current,
+      asr: "asr-faster-whisper-small",
+      separation: "separation-tiger-dnr",
+      tts: "tts-vieneu-v2",
+    }));
+    setSeparationChunkSeconds("30");
+    setSeparationContextSeconds("2");
+    setSeparationBatchSize("1");
+    setTranslationBackend("api");
+    if (!translationApiBaseUrl.trim()) applyApiProviderPreset("deepseek");
+    setNotice(
+      "Đã áp cấu hình chuẩn 6GB: ASR small, TIGER chunk 30s, VieNeu v2, dịch qua API. "
+      + "Nhà cung cấp mặc định là DeepSeek — đổi ở ô nhà cung cấp nếu bạn dùng API khác, rồi nhập key ở Cài đặt (server local thì không cần key).",
+    );
   }
 
   async function translateWithApi(job: Job) {
@@ -1752,8 +1814,10 @@ export default function Home() {
     setTranslateKeyMissing(false);
     setProblem(null);
     try {
+      const translatePath =
+        job.spec?.translation_backend === "api" ? "translate-api" : "translate-openai";
       const result = await api<{ job_id: string; status: string; model?: string }>(
-        `/jobs/${encodeURIComponent(job.id)}/translate-openai`,
+        `/jobs/${encodeURIComponent(job.id)}/${translatePath}`,
         { method: "POST" },
       );
       setNotice(
@@ -2088,13 +2152,27 @@ export default function Home() {
 
             <details className="advanced-config">
               <summary>Model và giọng nói nâng cao</summary>
+              <div className="integration-actions">
+                <button
+                  className="small-button"
+                  type="button"
+                  disabled={submitting || uploadConfigurationLocked}
+                  onClick={applySixGbPreset}
+                >
+                  Áp dụng cấu hình chuẩn 6GB VRAM
+                </button>
+              </div>
+              <p className="helper-copy">
+                Preset 6GB: ASR small, TIGER chunk 30s / context 2s / batch 1, VieNeu v2, dịch qua API (0 VRAM).
+                Nhà cung cấp mặc định là DeepSeek — đổi ở ô nhà cung cấp nếu bạn dùng API khác.
+              </p>
               <div className="model-select-grid">
                 {modelStages.map(([stage, label]) => (
                   <label className="field" key={stage}>
                     <span>{label}</span>
                     <select
                       value={selectedModels[stage] ?? ""}
-                      disabled={submitting || uploadConfigurationLocked || (stage === "mt" && translationBackend === "openai")}
+                      disabled={submitting || uploadConfigurationLocked || (stage === "mt" && translationBackend !== "local")}
                       onChange={(event) =>
                         setSelectedModels((current) => ({ ...current, [stage]: event.target.value }))
                       }
@@ -2111,36 +2189,113 @@ export default function Home() {
               </div>
               <div className="voice-grid">
                 <label className="field">
+                  <span>Chunk tách thoại (giây, để trống = mặc định máy chủ)</span>
+                  <input
+                    type="number"
+                    min={12}
+                    max={600}
+                    value={separationChunkSeconds}
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={(event) => setSeparationChunkSeconds(event.target.value)}
+                    placeholder="120"
+                  />
+                </label>
+                <label className="field">
+                  <span>Context tách thoại (giây)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={12}
+                    value={separationContextSeconds}
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={(event) => setSeparationContextSeconds(event.target.value)}
+                    placeholder="4"
+                  />
+                </label>
+                <label className="field">
+                  <span>Batch tách thoại</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={16}
+                    value={separationBatchSize}
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={(event) => setSeparationBatchSize(event.target.value)}
+                    placeholder="1"
+                  />
+                </label>
+              </div>
+              <div className="voice-grid">
+                <label className="field">
                   <span>Backend dịch</span>
                   <select
                     value={translationBackend}
                     disabled={submitting || uploadConfigurationLocked}
                     onChange={(event) =>
-                      setTranslationBackend(event.target.value === "openai" ? "openai" : "local")
+                      setTranslationBackend(
+                        event.target.value === "openai" ? "openai" : event.target.value === "api" ? "api" : "local",
+                      )
                     }
                   >
                     <option value="local">Cục bộ (Gemma trên máy)</option>
                     <option value="openai">API OpenAI</option>
+                    <option value="api">API tùy chỉnh (tương thích OpenAI)</option>
                   </select>
                 </label>
                 <label className="field">
-                  <span>Model API (khi chọn OpenAI)</span>
+                  <span>Model API (khi chọn OpenAI / API tùy chỉnh)</span>
                   <input
                     value={openaiModel}
-                    disabled={translationBackend !== "openai" || submitting || uploadConfigurationLocked}
+                    disabled={translationBackend === "local" || submitting || uploadConfigurationLocked}
                     onChange={(event) => setOpenaiModel(event.target.value)}
-                    placeholder="gpt-4o-mini (để trống = mặc định)"
+                    placeholder={translationBackend === "api" ? "deepseek-chat, tên model local, ..." : "gpt-4o-mini (để trống = mặc định)"}
                   />
                 </label>
               </div>
+              {translationBackend === "api" && (
+                <div className="voice-grid">
+                  <label className="field">
+                    <span>Nhà cung cấp API</span>
+                    <select
+                      value={apiProvider}
+                      disabled={submitting || uploadConfigurationLocked}
+                      onChange={(event) => applyApiProviderPreset(event.target.value)}
+                    >
+                      {apiProviderPresets.map((preset) => (
+                        <option key={preset.value} value={preset.value}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>API base URL</span>
+                    <input
+                      value={translationApiBaseUrl}
+                      disabled={submitting || uploadConfigurationLocked}
+                      onChange={(event) => { setTranslationApiBaseUrl(event.target.value); setApiProvider("custom"); }}
+                      placeholder="https://api.deepseek.com hoặc http://localhost:1234"
+                    />
+                  </label>
+                </div>
+              )}
               {translationBackend === "openai" && (
                 <p className="helper-copy">
                   Dịch bằng API gửi lời thoại lên OpenAI; model dịch cục bộ ở trên không dùng cho job này.
                   {openaiKeyConfigured === false
-                    ? " Chưa có key OpenAI — mở Cài đặt để nhập key trước khi tạo job."
+                    ? " Chưa có key API — mở Cài đặt để nhập key trước khi tạo job."
                     : openaiKeyConfigured
-                      ? " Key OpenAI đã cấu hình trên máy chủ."
+                      ? " Key API đã cấu hình trên máy chủ."
                       : " Trạng thái key chưa rõ — kiểm tra ở mục Cài đặt."}{" "}
+                  <a href="#settings">Mở Cài đặt</a>
+                </p>
+              )}
+              {translationBackend === "api" && (
+                <p className="helper-copy">
+                  Dịch bằng API tương thích OpenAI: chỉ cần server đó có endpoint <code>/v1/chat/completions</code>
+                  (DeepSeek, OpenRouter, Groq, LM Studio, Ollama, vLLM đều có). Dán cả URL có /v1 cũng được, server tự chuẩn hóa.
+                  Server local trên máy này (LM Studio / Ollama) không cần key; API ngoài cần key ở Cài đặt.
+                  {openaiKeyConfigured === false && !translationApiBaseUrl.includes("localhost") && !translationApiBaseUrl.includes("127.")
+                    ? " Chưa có key API — mở Cài đặt để nhập key trước khi tạo job."
+                    : ""}{" "}
                   <a href="#settings">Mở Cài đặt</a>
                 </p>
               )}
@@ -2443,14 +2598,14 @@ export default function Home() {
           </div>
           <span className={`status-chip ${openaiKeyConfigured ? "online" : "offline"}`}>
             {openaiKeyConfigured
-              ? "Key OpenAI đã cấu hình"
+              ? "Key API đã cấu hình"
               : openaiKeyConfigured === false
-                ? "Chưa có key OpenAI"
+                ? "Chưa có key API"
                 : "Chưa rõ trạng thái key"}
           </span>
         </div>
         <p className="section-intro">
-          Key OpenAI chỉ lưu phía máy chủ và không bao giờ hiển thị lại trên dashboard.
+          Key API chỉ lưu phía máy chủ và không bao giờ hiển thị lại trên dashboard. Một key này dùng chung cho OpenAI và mọi API tùy chỉnh; server local trên máy này thì không cần key.
           Backend dịch và model API dưới đây là mặc định cho job mới tạo sau đó; bạn vẫn đổi được từng job trong form tạo job.
         </p>
         {(settingsProblem || settingsNotice) && (
@@ -2460,7 +2615,7 @@ export default function Home() {
         )}
         <form className="admin-form" onSubmit={saveOpenAiKey}>
           <label className="field">
-            <span>Key OpenAI</span>
+            <span>Key API (OpenAI / nhà cung cấp khác)</span>
             <input
               type="password"
               autoComplete="off"
@@ -2501,25 +2656,51 @@ export default function Home() {
             <select
               value={translationBackend}
               onChange={(event) =>
-                setTranslationBackend(event.target.value === "openai" ? "openai" : "local")
+                setTranslationBackend(
+                  event.target.value === "openai" ? "openai" : event.target.value === "api" ? "api" : "local",
+                )
               }
             >
               <option value="local">Cục bộ (Gemma trên máy)</option>
               <option value="openai">API OpenAI</option>
+              <option value="api">API tùy chỉnh (tương thích OpenAI)</option>
             </select>
           </label>
           <label className="field">
             <span>Model API mặc định</span>
             <input
               value={openaiModel}
-              disabled={translationBackend !== "openai"}
+              disabled={translationBackend === "local"}
               onChange={(event) => setOpenaiModel(event.target.value)}
-              placeholder="gpt-4o-mini (để trống = mặc định)"
+              placeholder={translationBackend === "api" ? "deepseek-chat, tên model local, ..." : "gpt-4o-mini (để trống = mặc định)"}
             />
           </label>
         </div>
+        {translationBackend === "api" && (
+          <div className="settings-grid settings-defaults">
+            <label className="field">
+              <span>Nhà cung cấp API mặc định</span>
+              <select
+                value={apiProvider}
+                onChange={(event) => applyApiProviderPreset(event.target.value)}
+              >
+                {apiProviderPresets.map((preset) => (
+                  <option key={preset.value} value={preset.value}>{preset.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>API base URL mặc định</span>
+              <input
+                value={translationApiBaseUrl}
+                onChange={(event) => { setTranslationApiBaseUrl(event.target.value); setApiProvider("custom"); }}
+                placeholder="https://api.deepseek.com hoặc http://localhost:1234"
+              />
+            </label>
+          </div>
+        )}
         <p className="helper-copy">
-          Khi chọn API OpenAI, lời thoại được gửi lên OpenAI để dịch; tiến trình dịch chạy ngoài worker offline và job sẽ hiện trạng thái “Đang dịch” cho tới khi xong.
+          Khi chọn API, lời thoại được gửi lên nhà cung cấp đó để dịch; tiến trình dịch chạy ngoài worker offline và job sẽ hiện trạng thái “Đang dịch” cho tới khi xong.
         </p>
       </section>
 
@@ -2797,11 +2978,11 @@ export default function Home() {
             )}
           </div>
 
-          {selectedJob.status === "ready_translation" && selectedJob.spec?.translation_backend === "openai" && (
+          {selectedJob.status === "ready_translation" && (selectedJob.spec?.translation_backend === "openai" || selectedJob.spec?.translation_backend === "api") && (
             <div className="action-panel">
               <div>
                 <span className="action-kicker">DỊCH BẰNG API</span>
-                <h3>Dịch lời thoại qua OpenAI</h3>
+                <h3>Dịch lời thoại qua API{selectedJob.spec?.translation_api_base_url ? ` (${selectedJob.spec.translation_api_base_url})` : ""}</h3>
                 <p>
                   Job này đã cấu hình dịch bằng API
                   {selectedJob.spec?.models?.translation ? ` (model ${selectedJob.spec.models.translation})` : ""}
@@ -2810,7 +2991,7 @@ export default function Home() {
               </div>
               {translateKeyMissing && (
                 <div className="notice error" role="status">
-                  Chưa có key OpenAI trên máy chủ. <a href="#settings">Mở Cài đặt để nhập key</a> rồi thử lại.
+                  Chưa có key API trên máy chủ. <a href="#settings">Mở Cài đặt để nhập key</a> rồi thử lại (server local trên máy này thì không cần key).
                 </div>
               )}
               <div className="detail-actions">

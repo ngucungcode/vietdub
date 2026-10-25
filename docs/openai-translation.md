@@ -1,5 +1,11 @@
 # Dịch bằng OpenAI API (opt-in, thay cho Gemma local)
 
+> OpenAI là một trường hợp riêng của backend API chung: muốn dùng nhà
+> cung cấp khác (DeepSeek, OpenRouter, Groq, LM Studio, Ollama, ...)
+> thì xem `docs/custom-api-translation.md` — cùng code, chỉ khác base
+> URL và model. Tài liệu này giữ lại cho backend `openai` cũ, vẫn
+> dùng được nguyên vẹn.
+
 > Mặc định repo vẫn offline: dịch bằng Gemma 4 local qua llama.cpp.
 > Tài liệu này chỉ dùng khi bạn **chủ động** chấp nhận gửi transcript
 > (không gửi video/audio) ra OpenAI để đổi lấy chất lượng dịch cao hơn

@@ -1,6 +1,14 @@
-"""OpenAI-backed translator for the VietDub translation stage.
+"""API-backed translator for the VietDub translation stage.
 
 This is an OPT-IN replacement for the local llama.cpp / Gemma backend only.
+It speaks the OpenAI-compatible Chat Completions protocol, so it works
+with api.openai.com by default AND with any other provider that exposes
+the same ``POST /v1/chat/completions`` shape (DeepSeek, OpenRouter,
+Groq, a local LM Studio / Ollama / vLLM server, ...). The provider is
+chosen with ``base_url``; only the base changes, the request shape does
+not. Providers with a different native API (Anthropic messages, Gemini
+native, ...) are NOT supported by this translator.
+
 It implements the same ``Translator`` protocol as ``llama_translation.py``
 so ``translation_stage.py`` can use it without changing block building,
 checkpointing, glossary handling, or the duration-aware (NATURAL) path:
@@ -16,10 +24,14 @@ checkpointing, glossary handling, or the duration-aware (NATURAL) path:
 
 IMPORTANT: using this backend breaks the repo's offline / no-cloud
 promise for the translation stage only. ASR, separation, timing and TTS
-stay local. Enable it explicitly (see ``docs/openai-translation.md``),
+stay local. Enable it explicitly (see ``docs/custom-api-translation.md``),
 never by default, and never put the API key in a job spec, log, or
 artifact. The key is read from a secret file (default
-``/run/secrets/openai_api_key``) or, for local dev only, ``OPENAI_API_KEY``.
+``/run/secrets/openai_api_key``) or, for local dev only, ``OPENAI_API_KEY``
+(or ``TRANSLATION_API_KEY`` for non-OpenAI providers). A loopback
+provider (localhost / 127.x / ::1, e.g. LM Studio) usually ignores
+authentication, so the API layer may pass a dummy ``"local"`` key when
+no key is stored; remote providers always need a real key.
 """
 
 from __future__ import annotations
@@ -31,6 +43,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -53,14 +66,61 @@ def read_openai_api_key(api_key_file: Path | None = None) -> str:
             continue
         if value:
             return value
-    value = os.environ.get("OPENAI_API_KEY", "").strip()
+    for env_name in ("OPENAI_API_KEY", "TRANSLATION_API_KEY"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    raise TranslationError(
+        "openai_api_key_missing",
+        "Thiếu API key dịch (file /run/secrets/openai_api_key hoặc OPENAI_API_KEY / TRANSLATION_API_KEY)",
+        retryable=False,
+    )
+
+
+def normalize_api_base_url(raw: str) -> str:
+    """Normalize a provider base URL to the part before ``/v1``.
+
+    Users paste all kinds of shapes, and every one of these must land on
+    the same completions endpoint::
+
+        https://api.deepseek.com          -> https://api.deepseek.com
+        https://api.deepseek.com/v1       -> https://api.deepseek.com
+        https://openrouter.ai/api/v1      -> https://openrouter.ai/api
+        http://localhost:1234/v1/chat/completions -> http://localhost:1234
+
+    The translator then appends ``/v1/chat/completions`` itself. Only
+    http/https URLs without credentials, query, or fragment are accepted;
+    a URL that smuggles ``user:password@`` in is rejected instead of
+    being sent anywhere.
+    """
+
+    value = (raw or "").strip().rstrip("/")
     if not value:
-        raise TranslationError(
-            "openai_api_key_missing",
-            "Thiếu API key OpenAI (file /run/secrets/openai_api_key hoặc OPENAI_API_KEY)",
-            retryable=False,
-        )
-    return value
+        raise ValueError("API base URL trống")
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("API base URL phải bắt đầu bằng http:// hoặc https:// và có host")
+    if "@" in parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError("API base URL không được chứa user/password, query hay fragment")
+    path = parsed.path.rstrip("/")
+    for suffix in ("/v1/chat/completions", "/chat/completions", "/v1"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    netloc = parsed.hostname
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return f"{parsed.scheme}://{netloc}{path}"
+
+
+def is_loopback_api_base_url(raw: str) -> bool:
+    """True when the (already normalized or raw) base URL is local-only."""
+
+    try:
+        host = urlparse(raw).hostname or ""
+    except ValueError:
+        return False
+    return host in ("localhost", "::1") or host.startswith("127.")
 
 
 def _clean_output(text: str) -> str:
@@ -70,12 +130,14 @@ def _clean_output(text: str) -> str:
 
 
 class OpenAITranslator:
-    """Translator backed by OpenAI Chat Completions (sync httpx client).
+    """Translator backed by an OpenAI-compatible Chat Completions API.
 
-    ``model`` default is ``gpt-4o-mini``: the cheapest model that is
-    still reliable for film dialogue. Use ``gpt-4o`` only for a final
-    quality pass on a short episode -- cost is roughly 10-20x higher
-    for the same token count, and the stage makes one request per block.
+    ``base_url`` selects the provider (default api.openai.com); ``model``
+    is the provider's model id, verbatim (``gpt-4o-mini`` on OpenAI,
+    ``deepseek-chat`` on DeepSeek, a local model name on LM Studio, ...).
+    Use ``gpt-4o`` only for a final quality pass on a short episode --
+    cost is roughly 10-20x higher for the same token count, and the
+    stage makes one request per block.
     """
 
     def __init__(
@@ -91,11 +153,11 @@ class OpenAITranslator:
     ) -> None:
         if not api_key or not api_key.strip():
             raise TranslationError(
-                "openai_api_key_missing", "Thiếu API key OpenAI", retryable=False
+                "openai_api_key_missing", "Thiếu API key dịch", retryable=False
             )
         if not model or not model.strip():
             raise TranslationError(
-                "openai_model_invalid", "Model OpenAI không hợp lệ", retryable=False
+                "openai_model_invalid", "Model API dịch không hợp lệ", retryable=False
             )
         if max_output_tokens < 32 or max_output_tokens > 4096:
             raise TranslationError(
@@ -103,14 +165,22 @@ class OpenAITranslator:
                 "max_output_tokens phải từ 32 đến 4096",
                 retryable=False,
             )
+        try:
+            normalized_base_url = normalize_api_base_url(base_url)
+        except ValueError as exc:
+            raise TranslationError(
+                "translation_api_base_url_invalid",
+                f"API base URL không hợp lệ: {exc}",
+                retryable=False,
+            ) from exc
         self._model = model.strip()
-        self._base_url = base_url.rstrip("/")
+        self._base_url = normalized_base_url
         self._max_output_tokens = max_output_tokens
         self._max_retries = max(0, max_retries)
         self._glossary: dict[str, str] = {}
         self._context_before_vi: str | None = None
         self._client = client or httpx.Client(
-            base_url=base_url.rstrip("/"),
+            base_url=normalized_base_url,
             headers={
                 "Authorization": f"Bearer {api_key.strip()}",
                 "Content-Type": "application/json",
@@ -266,7 +336,7 @@ class OpenAITranslator:
             except (KeyError, IndexError, TypeError) as exc:
                 raise TranslationError(
                     "openai_response_invalid",
-                    "Phản hồi OpenAI không hợp lệ",
+                    "Phản hồi API dịch không hợp lệ",
                     retryable=True,
                 ) from exc
             cleaned = _clean_output(str(content))
@@ -295,7 +365,7 @@ class OpenAITranslator:
                     continue
                 raise TranslationError(
                     "openai_network_error",
-                    "Không kết nối được OpenAI",
+                    "Không kết nối được API dịch",
                     retryable=True,
                 ) from exc
             if resp.status_code == 200:
@@ -304,7 +374,7 @@ class OpenAITranslator:
                 except ValueError as exc:
                     raise TranslationError(
                         "openai_response_invalid",
-                        "Phản hồi OpenAI không phải JSON",
+                        "Phản hồi API dịch không phải JSON",
                         retryable=True,
                     ) from exc
             # 401/403/400: retrying will not help. 429/5xx: retry.
@@ -314,12 +384,24 @@ class OpenAITranslator:
                 continue
             raise TranslationError(
                 "openai_api_error",
-                f"OpenAI trả về HTTP {resp.status_code}",
+                f"API dịch trả về HTTP {resp.status_code}",
                 retryable=retryable,
             )
         raise TranslationError(
-            "openai_api_error", "OpenAI không trả về kết quả", retryable=True
+            "openai_api_error", "API dịch không trả về kết quả", retryable=True
         ) from last_error
 
 
-__all__ = ["OpenAITranslator", "read_openai_api_key"]
+# Generic names for the same translator: "openai" is just the default
+# provider of an OpenAI-compatible API, not a different protocol.
+ApiTranslator = OpenAITranslator
+read_api_key = read_openai_api_key
+
+__all__ = [
+    "ApiTranslator",
+    "OpenAITranslator",
+    "is_loopback_api_base_url",
+    "normalize_api_base_url",
+    "read_api_key",
+    "read_openai_api_key",
+]

@@ -427,6 +427,12 @@ class Phase4Stage:
         self._separation_chunk_seconds = separation_chunk_seconds
         self._separation_context_seconds = separation_context_seconds
         self._separation_batch_size = separation_batch_size
+        # Server defaults, kept apart so a per-job spec override applied
+        # in run() never leaks into the next job (the worker reuses one
+        # stage instance for every job).
+        self._server_separation_chunk_seconds = separation_chunk_seconds
+        self._server_separation_context_seconds = separation_context_seconds
+        self._server_separation_batch_size = separation_batch_size
         self._separation_device = separation_device
 
         self._separator_factory = separator_factory or self._build_separator
@@ -462,6 +468,23 @@ class Phase4Stage:
             raise InvalidTransition(
                 f"Job {job.id} không ở trạng thái có thể chạy Phase 4"
             )
+
+        # Per-job separation tuning (e.g. the 6 GB preset's 30 s chunk):
+        # the spec wins for this job only, otherwise the server defaults
+        # above apply. Values outside the server's ranges are ignored
+        # instead of failing a job over a stale spec.
+        spec = job.spec if isinstance(job.spec, Mapping) else {}
+        self._separation_chunk_seconds = self._spec_number(
+            spec, "separation_chunk_seconds", self._server_separation_chunk_seconds, 12.0, 600.0
+        )
+        self._separation_context_seconds = self._spec_number(
+            spec, "separation_context_seconds", self._server_separation_context_seconds, 0.0, 12.0
+        )
+        self._separation_batch_size = int(
+            self._spec_number(
+                spec, "separation_batch_size", self._server_separation_batch_size, 1, 16
+            )
+        )
 
         try:
             translation = await self._load_translation(job)
@@ -3743,6 +3766,17 @@ class Phase4Stage:
             "size_bytes": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
         }
+
+    @staticmethod
+    def _spec_number(
+        spec: Mapping[str, Any], key: str, default: float, low: float, high: float
+    ) -> float:
+        value = spec.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        if not math.isfinite(float(value)) or not low <= float(value) <= high:
+            return default
+        return float(value)
 
     def _separation_model_id(self, job: JobRecord) -> str:
         return self._selected_model(job, "separation", self._default_separation_model_id)
